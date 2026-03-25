@@ -180,8 +180,6 @@ python src/gui_demo.py
 
 ## 📚 参考文献
 
-## 📚 参考文献
-
 1.  **[DEX]** Rothe R, Timofte R, Van Gool L. DEX: Deep EXpectation of apparent age from a single image[C]//Proceedings of the IEEE International Conference on Computer Vision Workshops. 2015: 10-15.
 2.  **[OR-CNN]** Niu Z, Zhou M, Wang L, et al. Ordinal regression with multiple output CNN for age estimation[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. 2016: 4920-4928.
 3.  **[DLDL]** Gao B B, Xing C, Xie C W, et al. Deep label distribution learning with label ambiguity[J]. IEEE Transactions on Image Processing, 2017, 26(6): 2825-2838.
