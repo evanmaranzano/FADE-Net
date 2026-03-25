@@ -28,9 +28,9 @@
 ## ✨ Key Features
 
 1.  **Dual-Stream Architecture (New)**: Defines a "Texture Branch" (Stride-16) and "Semantic Branch" (Stride-32) to capture both fine wrinkles and facial shape.
-2.  **Spatial Pyramid Pooling (SPP) (New)**: Enhanced structural design with SPP and stratified splitting further improves representation efficiency.
-3.  **Hybrid Attention**: Injecting **Coordinate Attention (CA)** into deep layers to enhance spatial awareness without heavy computation.
-4.  **DLDL-v2**: Adaptive Label Distribution Learning with **Ranking Loss (0.3)** and **Weighted L1**.
+2.  **Spatial Pyramid Pooling (SPP) (New)** [6]: Enhanced structural design with SPP and stratified splitting further improves representation efficiency.
+3.  **Hybrid Attention**: Injecting **Coordinate Attention (CA)** [5] into deep layers to enhance spatial awareness without heavy computation.
+4.  **DLDL-v2**: Adaptive Label Distribution Learning with **Ranking Loss (0.3)** and **Weighted L1** [3].
 5.  **Robust Training**: **Mixup** + **Safe Random Erasing** (Synergistic Augmentation) + **Label Sigma Jitter** ensures robust feature learning.
 6.  **Fine-Grained Augmentation**: Optimized pipeline with **Affine (Shear/Trans)** and **Gaussian Blur** for geometric and quality robustness.
 7.  **Pre-training**: Uses **ImageNet1K V2** weights (Top-1 75.2%) for robust initialization.
@@ -112,12 +112,11 @@ python src/gui_demo.py
 | Rank | Method | Backbone | MAE (Lower ↓) | Params | Year / Source |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **1** | **FADE-Net (Ours)** | **MobileNetV3** | **3.057** | **4.84M** | **2025** |
-| 2 | **GRANET** [1] | ResNet-50 | 3.10 | ~25.5M | 2021 / IEEE Access |
-| 3 | **CDCNN** [2] | CNN (Multi-Task) | 3.11 | - | 2018 / CVPR |
-| 4 | OR-CNN [3] | VGG-16 | 3.34 | 138M | 2016 / CVPR |
-| 5 | RAN [4] | ResNet-34 | 3.42 | ~21.8M | 2017 / CVPR |
-| 6 | CORAL [5] | ResNet-34 | 3.48 | ~21.8M | 2020 / PRL |
-| 7 | DEX [6] | VGG-16 | 3.80 | 138M | 2015 / ICCV |
+| 2 | **GRANET** [7] | ResNet-50 | 3.10 | ~25.5M | 2021 / IEEE Access |
+| 3 | **OR-CNN** [2] | VGG-16 | 3.34 | 138M | 2016 / CVPR |
+| 4 | **RAN** [9] | ResNet-34 | 3.42 | ~21.8M | 2017 / CVPR |
+| 5 | **CORAL** [8] | ResNet-34 | 3.48 | ~21.8M | 2020 / PRL |
+| 6 | **DEX** [1] | VGG-16 | 3.80 | 138M | 2015 / ICCV |
 
 > **Highlight**: FADE-Net achieves **Competitive Accuracy (3.057 vs 3.10)** while using **significantly fewer parameters (4.84M vs 25M+)**. Surprisingly, it is even **lighter than the vanilla MobileNetV3-Large (5.48M)** due to our optimized Task-Specific Head design.
 >
@@ -142,14 +141,6 @@ Direct comparison with papers that explicitly benchmarked on AFAD in the last tw
 > **📝 Note on Performance:** Our reported MAE of **3.02** is evaluated on the held-out Test Set (5%). We also observed a best Validation MAE of **3.01** during training.
 
 > **📝 Note on Split Protocol:** Different papers use varying data splits. We use a stratified **72-8-20 split** (Train/Val/Test) which is a standard 80-20 implementation with an explicit validation set carved out from the training portion. This provides 72% for training, 8% for validation, and 20% for testing. This protocol is widely used in academic benchmarks and ensures fair comparison with other methods.
-
-### 🌐 Comparison with General Transformer SOTA (Context)
-For broader context, we look at massive Transformer models evaluated on similar large-scale datasets (IMDB-Wiki):
-
-| Method | Year | Dataset Context | MAE | Type |
-| :--- | :--- | :--- | :--- | :--- |
-| **MiVOLO** [9] | 2023 | IMDB-Wiki | ~2.6 - 2.9 | **Transformer (Heavy)** |
-| **FP-Age** [10] | 2023 | Wild | ~2.95 | **Attention (Heavy)** |
 
 > **Note**: While Transformer giants achieve slightly lower MAE (~2.6), FADE-Net (3.01) delivers **90% of the performance** at **5% of the computational cost**.
 
@@ -194,24 +185,32 @@ To ensure fair comparison and scientific potential, we adhere to strict academic
 
 ## 📚 References
 
-1.  **[GRANET]** A. Garain, R. Ray, P. K. Singh, et al., "GRA_Net: A Deep Learning Model for Classification of Age and Gender from Facial Images," *IEEE Access*, vol. 9, pp. 85672-85689, 2021.
-2.  **[CDCNN]** K. Zhang, et al., "Cross-Dataset Learning for Age Estimation," in *IEEE CVPR*, 2018. (Original 3.11 MAE Source)
-3.  **[OR-CNN]** Z. Niu, M. Zhou, L. Wang, X. Gao, and G. Hua, "Ordinal regression with multiple output CNN for age estimation," in *CVPR*, 2016.
-4.  **[RAN]** F. Wang, et al., "Residual Attention Network for Image Classification," in *CVPR*, 2017. (Applied to Age Estimation in benchmarks).
-5.  **[CORAL]** W. Cao, V. Mirjalili, and S. Raschka, "Rank Consistent Ordinal Regression for Neural Networks with Application to Age Estimation," *Pattern Recognition Letters*, vol. 140, pp. 325-331, 2020.
-6.  **[DEX]** R. Rothe, R. Timofte, and L. Van Gool, "DEX: Deep EXpectation of apparent age from a single image," in *ICCV Workshops*, 2015.
-7.  **[DLDL]** B.-B. Gao, C. Xing, C.-W. Xie, J. Wu, and X. Geng, "Deep label distribution learning with label ambiguity," *IEEE Transactions on Image Processing*, 2017.
-8.  **[MobileViT]** S. Mehta and M. Rastegari, "MobileViT: Light-weight, General-purpose, and Mobile-friendly Vision Transformer," in *ICLR*, 2022.
-9.  **[MiVOLO]** Maksim Kuprashevich and Irina Tolstykh, "MiVOLO: Multi-input Vision Transformer for Age and Gender Estimation," in *arXiv preprint arXiv:2307.04616*, 2023.
-10. **[FP-Age]** H. Zhang, et al., "FP-Age: Leveraging Face Parsing Attention for Facial Age Estimation in the Wild," in *IEEE Transactions on Multimedia*, 2023.
-11. **[DCN-R34]** J. Xi, Z. Xu, Z. Yan, W. Liu, and Y. Liu, "Portrait age recognition method based on improved ResNet and deformable convolution," *Electronic Research Archive (ERA)*, vol. 31, no. 8, pp. 4907-4924, 2023.
-12. **[MSDNN]** S. E. Bekhouche, A. Benlamoudi, F. Dornaika, H. Telli, and Y. Bounab, "Facial Age Estimation Using Multi-Stage Deep Neural Networks," *Electronics*, vol. 13, no. 16, 2024.
-13. **[MobileNetV3]** HOWARD A, SANDLER M, CHU G, et al. "Searching for MobileNetV3," in *Proc. IEEE/CVF ICCV*, 2019, pp. 1314-1324.
-14. **[CoordAtt]** HOU Q, ZHOU D, FENG J. "Coordinate attention for efficient mobile network design," in *Proc. IEEE/CVF CVPR*, 2021, pp. 13713-13722.
-15. **[SPP]** HE K, ZHANG X, REN S, et al. "Spatial pyramid pooling in deep convolutional networks for visual recognition," *IEEE Trans. Pattern Anal. Mach. Intell.*, vol. 37, no. 9, pp. 1904-1916, 2015.
-16. **[LDL]** GENG X. "Label distribution learning," *IEEE Trans. Knowl. Data Eng.*, vol. 28, no. 7, pp. 1734-1748, 2016.
-17. **[Eval-Practice]** PAPLHAM J, BOCHINSKI E, SIKORA T. "A Call to Reflect on Evaluation Practices for Age Estimation: Comparative Analysis of the State-of-the-Art and a Unified Benchmark," in *Proc. IEEE/CVF CVPR*, 2024, pp. 1-11.
-18. **[Review-CN]** 王一帆, 孙辉, 张静, 等. "基于深度学习的人脸年龄估计研究综述," *计算机工程与应用*, vol. 59, no. 3, pp. 1-15, 2023.
+## 📚 References
+
+1.  **[DEX]** Rothe R, Timofte R, Van Gool L. DEX: Deep EXpectation of apparent age from a single image[C]//Proceedings of the IEEE International Conference on Computer Vision Workshops. 2015: 10-15.
+2.  **[OR-CNN]** Niu Z, Zhou M, Wang L, et al. Ordinal regression with multiple output CNN for age estimation[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. 2016: 4920-4928.
+3.  **[DLDL]** Gao B B, Xing C, Xie C W, et al. Deep label distribution learning with label ambiguity[J]. IEEE Transactions on Image Processing, 2017, 26(6): 2825-2838.
+4.  **[MobileNetV3]** Howard A, Sandler M, Chu G, et al. Searching for MobileNetV3[C]//Proceedings of the IEEE/CVF International Conference on Computer Vision. 2019: 1314-1324.
+5.  **[CoordAtt]** Hou Q, Zhou D, Feng J. Coordinate attention for efficient mobile network design[C]//Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 2021: 13713-13722.
+6.  **[SPP]** He K, Zhang X, Ren S, et al. Spatial pyramid pooling in deep convolutional networks for visual recognition[J]. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2015, 37(9): 1904-1916.
+7.  **[GRA_Net]** Garain A, Ray B, Singh P K, et al. GRA_Net: A deep learning model for classification of age and gender from facial images[J]. IEEE Access, 2021, 9: 85672-85689.
+8.  **[CORAL]** Cao W, Mirjalili V, Raschka S. Rank consistent ordinal regression for neural networks with application to age estimation[J]. Pattern Recognition Letters, 2020, 140: 325-331.
+9.  **[RAN]** Wang F, Jiang M, Qian C, et al. Residual attention network for image classification[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. 2017: 3156-3164.
+10. **[MobileViT]** Mehta S, Rastegari M. MobileViT: Light-weight, general-purpose, and mobile-friendly vision transformer[C]//International Conference on Learning Representations. 2022.
+11. **[DCN-R34]** Xi J, Xu Z, Yan Z, et al. Portrait age recognition method based on improved ResNet and deformable convolution[J]. Electronic Research Archive, 2023, 31(11): 6585-6599.
+12. **[MSDNN]** Bekhouche S E, Benlamoudi A, Dornaika F, et al. Facial age estimation using multi-stage deep neural networks[J]. Electronics, 2024, 13(16): 3259.
+13. **[LDL]** Geng X. Label distribution learning[J]. IEEE Transactions on Knowledge and Data Engineering, 2016, 28(7): 1734-1748.
+14. **[Eval-Practice]** Paplham J, Franc V. A Call to Reflect on Evaluation Practices for Age Estimation: Comparative Analysis of the State-of-the-Art and a Unified Benchmark[C]//Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. 2024: 1196-1205.
+15. **[APPA-REAL]** Agustsson E, Timofte R, Escalera S, et al. Apparent and real age estimation in still images with deep residual regressors on APPA-REAL database[C]//Proceedings of the 12th IEEE International Conference on Automatic Face and Gesture Recognition. 2017: 87-94.
+16. **[AgeDB]** Moschoglou S, Papaioannou A, Sagonas C, et al. AgeDB: The First Manually Collected, In-The-Wild Age Database[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition Workshops. 2017: 51-59.
+17. **[Ranking-CNN]** Chen S, Zhang C, Dong M, et al. Using Ranking-CNN for age estimation[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. 2017: 5183-5192.
+18. **[DRF]** Shen W, Guo Y, Wang Y, et al. Deep regression forests for age estimation[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. 2018: 2304-2313.
+19. **[MV-Loss]** Pan H, Han H, Shan S, et al. Mean-variance loss for deep age estimation from a face[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition. 2018: 5285-5294.
+20. **[Expectation-LDL]** Gao B B, Zhou H Y, Wu J, et al. Age estimation using expectation of label distribution learning[C]//Proceedings of the Twenty-Seventh International Joint Conference on Artificial Intelligence. 2018: 712-718.
+21. **[SSR-Net]** Yang T Y, Huang Y H, Lin Y Y, et al. SSR-Net: A compact soft stagewise regression network for age estimation[C]//Proceedings of the Twenty-Seventh International Joint Conference on Artificial Intelligence. 2018: 1078-1084.
+22. **[Children-Specialized]** Antipov G, Baccouche M, Berrani S A, et al. Apparent age estimation from face images combining general and children-specialized deep learning models[C]//Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition Workshops. 2016: 96-104.
+23. **[Review-CN]** 张珂, 王新胜, 郭玉荣, 等. 人脸年龄估计的深度学习方法综述[J]. 中国图象图形学报, 2019, 24(8): 1215-1230.
+
 
 ---
 
