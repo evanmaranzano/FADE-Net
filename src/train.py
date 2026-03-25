@@ -132,6 +132,27 @@ def train(args):
         cfg.freeze_backbone_epochs = args.freeze
         print(f"🔧 CLI Override: Freeze Epochs -> {cfg.freeze_backbone_epochs}")
 
+    # Ablation switches: map CLI args to config flags
+    if getattr(args, 'use_ha', None) is not None:
+        cfg.use_hybrid_attention = args.use_ha
+        print(f"🔧 CLI Override: Hybrid Attention -> {cfg.use_hybrid_attention}")
+
+    if getattr(args, 'use_dldl', None) is not None:
+        cfg.use_dldl_v2 = args.use_dldl
+        print(f"🔧 CLI Override: DLDL-v2 -> {cfg.use_dldl_v2}")
+
+    if getattr(args, 'use_msff', None) is not None:
+        cfg.use_multi_scale = args.use_msff
+        print(f"🔧 CLI Override: MSFF -> {cfg.use_multi_scale}")
+
+    if getattr(args, 'use_spp', None) is not None:
+        cfg.use_spp = args.use_spp
+        print(f"🔧 CLI Override: SPP -> {cfg.use_spp}")
+
+    if getattr(args, 'use_mv', None) is not None:
+        cfg.use_mv_loss = args.use_mv
+        print(f"🔧 CLI Override: Mean-Variance Loss -> {cfg.use_mv_loss}")
+
     # 🌱 Easter Egg: Print Seed Meaning
     if seed in cfg.ACADEMIC_SEEDS:
         print(f"✨ Seed {seed}: {cfg.ACADEMIC_SEEDS[seed]}")
@@ -563,13 +584,61 @@ if __name__ == "__main__":
         parser.add_argument('--batch_size', type=int, help='Override batch size')
         parser.add_argument('--split', type=str, choices=['80-10-10', '90-5-5', '72-8-20'], help="Select Split Protocol")
         parser.add_argument('--freeze', type=int, dest='freeze', help='Override backbone freeze epochs')
-        parser.add_argument('--freeze_backbone_epochs', type=int, dest='freeze_alias', help='Alias for --freeze') 
-        
+        parser.add_argument('--freeze_backbone_epochs', type=int, dest='freeze_alias', help='Alias for --freeze')
+
+        # --- Ablation Switches (消融实验开关) ---
+        parser.add_argument('--ha', action='store_true', help='Enable Hybrid Attention (CoordAtt)')
+        parser.add_argument('--no-ha', dest='ha_false', action='store_true', help='Disable Hybrid Attention')
+        parser.add_argument('--dldl', action='store_true', help='Enable DLDL-v2')
+        parser.add_argument('--no-dldl', dest='dldl_false', action='store_true', help='Disable DLDL-v2')
+        parser.add_argument('--msff', action='store_true', help='Enable Multi-Scale Feature Fusion')
+        parser.add_argument('--no-msff', dest='msff_false', action='store_true', help='Disable MSFF')
+        parser.add_argument('--spp', action='store_true', help='Enable Spatial Pyramid Pooling')
+        parser.add_argument('--no-spp', dest='spp_false', action='store_true', help='Disable SPP')
+        parser.add_argument('--mv', action='store_true', help='Enable Mean-Variance Loss')
+        parser.add_argument('--no-mv', dest='mv_false', action='store_true', help='Disable MV Loss')
+
         args = parser.parse_args()
-        
+
         # Handle alias
         if args.freeze_alias is not None:
             args.freeze = args.freeze_alias
+
+        # Handle ablation flags (only override if explicitly set)
+        if args.ha_false:
+            args.use_ha = False
+        elif args.ha:
+            args.use_ha = True
+        else:
+            args.use_ha = None  # Use config default
+
+        if args.dldl_false:
+            args.use_dldl = False
+        elif args.dldl:
+            args.use_dldl = True
+        else:
+            args.use_dldl = None
+
+        if args.msff_false:
+            args.use_msff = False
+        elif args.msff:
+            args.use_msff = True
+        else:
+            args.use_msff = None
+
+        if args.spp_false:
+            args.use_spp = False
+        elif args.spp:
+            args.use_spp = True
+        else:
+            args.use_spp = None
+
+        if args.mv_false:
+            args.use_mv = False
+        elif args.mv:
+            args.use_mv = True
+        else:
+            args.use_mv = None
 
         torch.backends.cudnn.benchmark = True
         train(args)

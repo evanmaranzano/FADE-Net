@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import cv2
 # import mediapipe as mp
 import copy
 import random
@@ -107,93 +106,7 @@ class DLDLProcessor:
         return batch_expected_age
 
 # ==========================================
-# 2. 人脸对齐工具 (Face Aligner)
-# ==========================================
-class FaceAligner:
-    def __init__(self):
-        import mediapipe as mp
-        self.mp_face_detection = mp.solutions.face_detection
-        self.detector = self.mp_face_detection.FaceDetection(min_detection_confidence=0.3)
-
-    def align(self, image, desired_size=224, desired_left_eye=(0.32, 0.35)):
-        """
-        标准人脸对齐 (Similarity Transform)
-        1. 旋转: 眼睛连线水平
-        2. 缩放+平移: 将眼睛固定在图片的特定位置
-        Output: 224x224 (默认) 的标准人脸图
-        """
-        try:
-            img_np = np.array(image)
-            h, w, c = img_np.shape
-            
-            # 检测人脸
-            results = self.detector.process(img_np)
-            
-            if not results.detections:
-                return None # 检测失败，直接丢弃
-            
-            # 取置信度最高的一个
-            detection = results.detections[0]
-            # score = detection.score[0]
-            # if score < 0.5: # 再次过滤低置信度 -> 已由 init 参数控制，此处移除以避免矛盾
-            #    return None
-                
-            keypoints = detection.location_data.relative_keypoints
-            # MediaPipe: 0=右眼(图左), 1=左眼(图右)
-            right_eye = np.array([keypoints[0].x * w, keypoints[0].y * h])
-            left_eye = np.array([keypoints[1].x * w, keypoints[1].y * h])
-            
-            # 1. 计算角度 (使得 左眼-右眼 连线水平)
-            # dy = right - left (y轴向下)
-            dY = right_eye[1] - left_eye[1]
-            dX = right_eye[0] - left_eye[0]
-            angle = np.degrees(np.arctan2(dY, dX)) - 180
-            
-            # 2. 计算当前瞳距
-            dist = np.sqrt((dX ** 2) + (dY ** 2))
-            
-            # 3. 计算目标瞳距
-            # desired_left_eye[0] 是左眼(图右)的 x 比例？ 
-            # 通常 convention: desired_left_eye=(0.35, 0.35) 指的是 "Left Eye" (subject's left, image right) 的位置？
-            # 不，通常指的是 "Image Left" 那个眼睛 (即 Right Eye of subject) 在 0.35。
-            # 让我们明确定义：
-            # 我们希望：Subject's Right Eye (Image Left) at x = 1.0 - desired_left_eye_x ? No.
-            # 让我们用标准常用值：
-            # Subject's Right Eye (Image Left) -> (desired_dist_x, desired_dist_y)
-            # Subject's Left Eye (Image Right) -> (1-desired_dist_x, desired_dist_y)
-            
-            desired_right_eye_x = 1.0 - desired_left_eye[0] # e.g. 1 - 0.32 = 0.68
-            
-            # 目标瞳距 (像素)
-            desired_dist_pix = (desired_right_eye_x - desired_left_eye[0]) * desired_size
-            
-            # 4. 计算缩放比例
-            scale = desired_dist_pix / dist
-            
-            # 5. 计算旋转+缩放矩阵
-            # 旋转中心: 两眼中心
-            eyes_center = ((left_eye[0] + right_eye[0]) // 2, (left_eye[1] + right_eye[1]) // 2)
-            M = cv2.getRotationMatrix2D(eyes_center, angle, scale)
-            
-            # 6. 加入平移分量 (Update Translation)
-            # 我们希望 eyes_center 移动到图片中心 (desired_size*0.5, desired_size*desired_eye_y)
-            tX = desired_size * 0.5
-            tY = desired_size * desired_left_eye[1]
-            
-            M[0, 2] += (tX - eyes_center[0])
-            M[1, 2] += (tY - eyes_center[1])
-            
-            # 7. Warp
-            aligned_np = cv2.warpAffine(img_np, M, (desired_size, desired_size), flags=cv2.INTER_CUBIC)
-            
-            return Image.fromarray(aligned_np)
-
-        except Exception as e:
-            # print(f"Align Fail: {e}")
-            return None
-
-# ==========================================
-# 3. EMA (指数滑动平均)
+# 3. EMA
 # ==========================================
 class EMAModel:
     def __init__(self, model, decay=0.999):

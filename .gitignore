@@ -39,3 +39,7 @@ technical_report.html
 # Personal identification (student ID, names, etc.)
 *曾皓钰*
 *3222707108*
+
+# AI Assistant and Local Output
+.claude/
+output/

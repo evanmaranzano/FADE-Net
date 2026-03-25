@@ -7,7 +7,7 @@ import random
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
 from torchvision import transforms
-from utils import DLDLProcessor, FaceAligner
+from utils import DLDLProcessor
 from config import Config, ROOT_DIR
 from collections import Counter, defaultdict
 from scipy.ndimage import gaussian_filter1d
@@ -388,12 +388,7 @@ def get_dataloaders(config):
             
     if not all_datasets:
         raise ValueError("No datasets found! Check config paths.")
-        
-    # LDS Weights based on FULL distribution
-    class_weights = None
-    if getattr(config, 'use_reweighting', False):
-        class_weights = calculate_lds_weights(all_ages, config)
-        
+
     full_dataset = ConcatDataset(all_datasets)
     print(f"\n📦 Total Images: {len(full_dataset)}")
     
@@ -431,6 +426,15 @@ def get_dataloaders(config):
         split_ratios=target_ratios,
         save_path=os.path.join(ROOT_DIR, split_filename)
     )
+
+    # LDS Weights based on TRAIN distribution only (avoid val/test leakage)
+    class_weights = None
+    if getattr(config, 'use_reweighting', False):
+        if not hasattr(train_subset, 'indices'):
+            raise AttributeError("Train subset must expose 'indices' for LDS weighting.")
+        train_ages = [all_ages[i] for i in train_subset.indices]
+        print(f"[LDS] Using TRAIN-only age distribution ({len(train_ages)} samples)")
+        class_weights = calculate_lds_weights(train_ages, config)
     
     # Apply Transforms
     # Enable Label Augmentation for Train Set

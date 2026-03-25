@@ -176,9 +176,11 @@ To ensure fair comparison and scientific potential, we adhere to strict academic
     
     | Seed | Test MAE | Status | Notes |
     | :--- | :--- | :--- | :--- |
-    | **42** | **3.095** | ✅ Verified | Standard Academic Benchmark |
     | **1337** | **3.057** | ✅ Verified | "Elite Seed" (Best Single Model) |
-    | **Ensemble** | **3.02** | ✅ Verified | 42 + 1337 Probability Averaging |
+    | **42** | **3.095** | ✅ Verified | Standard Academic Benchmark |
+    | **2026** | **3.105** | ✅ Verified | 2026 Academic Seed |
+    | **Mean±Std** | **3.086 ± 0.020** | ✅ Verified | 3-Seed Average (1337, 42, 2026) |
+    | **Ensemble** | **3.02** | ✅ Verified | Probability Averaging |
 3.  **Reproducibility Script**:
     ```bash
     # Run academic benchmark (Interactive / Batch)
