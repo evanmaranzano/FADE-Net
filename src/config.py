@@ -95,6 +95,11 @@ class Config:
     lambda_triplet = 0.1
     triplet_base_margin = 1.0
     triplet_alpha = 0.05
+    triplet_age_threshold = 3.0  # years: within this = positive pair
+
+    # MoE Head (M5)
+    moe_num_experts = 3
+    moe_hidden_dim = 256
 
     # Asymmetric Ordinal Loss (M3)
     lambda_asym = 0.1

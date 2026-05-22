@@ -276,7 +276,7 @@ class LightweightAgeEstimator(nn.Module):
             self.final_head = AgeMoEHead(
                 classifier_input_dim, num_classes,
                 num_experts=getattr(config, "moe_num_experts", 3),
-                hidden_dim=1024,
+                hidden_dim=getattr(config, "moe_hidden_dim", 256),
                 dropout=dropout,
             )
         else:

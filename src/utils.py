@@ -318,45 +318,38 @@ class MeanVarianceLoss(nn.Module):
 class AdaptiveTripletLoss(nn.Module):
     """Adaptive Triplet Loss with dynamic margin based on age difference.
     margin = base_margin * (1 + alpha * |age_diff|)
-    Inspired by HEAT (Multimedia Systems 2026)."""
+    Vectorized implementation. Inspired by HEAT (Multimedia Systems 2026)."""
 
-    def __init__(self, base_margin=1.0, alpha=0.05):
+    def __init__(self, base_margin=1.0, alpha=0.05, age_threshold=3.0):
         super().__init__()
         self.base_margin = base_margin
         self.alpha = alpha
+        self.age_threshold = age_threshold
 
     def forward(self, embeddings, ages):
         B = embeddings.shape[0]
         if B < 2:
             return torch.tensor(0.0, device=embeddings.device)
-        # Pairwise distances
-        dist = torch.cdist(embeddings, embeddings, p=2)
-        # Pairwise age differences
-        age_diff = torch.abs(ages.unsqueeze(0) - ages.unsqueeze(1))
-        # Triplet loss: for each anchor, positive (close age), negative (far age)
-        mask_pos = age_diff < 3.0
-        mask_neg = age_diff >= 3.0
-        loss = torch.tensor(0.0, device=embeddings.device)
-        count = 0
-        for i in range(B):
-            pos_idx = mask_pos[i].nonzero(as_tuple=True)[0]
-            neg_idx = mask_neg[i].nonzero(as_tuple=True)[0]
-            if len(pos_idx) == 0 or len(neg_idx) == 0:
-                continue
-            for j in pos_idx:
-                if i == j:
-                    continue
-                d_pos = dist[i, j]
-                for k in neg_idx:
-                    d_neg = dist[i, k]
-                    m = self.base_margin * (1.0 + self.alpha * age_diff[i, k])
-                    violation = d_pos - d_neg + m
-                    if violation > 0:
-                        loss += violation
-                        count += 1
-        if count > 0:
-            loss = loss / count
-        return loss
+        dist = torch.cdist(embeddings, embeddings, p=2)  # (B, B)
+        age_diff = torch.abs(ages.unsqueeze(0) - ages.unsqueeze(1))  # (B, B)
+        mask_pos = (age_diff < self.age_threshold).float()
+        mask_neg = (age_diff >= self.age_threshold).float()
+        # Remove self-pairs from positive mask
+        eye = torch.eye(B, device=embeddings.device)
+        mask_pos = mask_pos * (1 - eye)
+        # d_pos[i,j] = dist[i,j] for positive pairs, expand to (B,B,1)
+        # d_neg[i,k] = dist[i,k] for negative pairs, expand to (B,1,B)
+        # margin[i,k] for negative pairs
+        d_pos = dist.unsqueeze(2)       # (B, B, 1)
+        d_neg = dist.unsqueeze(1)       # (B, 1, B)
+        m = self.base_margin * (1.0 + self.alpha * age_diff.unsqueeze(1))  # (B, 1, B)
+        violation = F.relu(d_pos - d_neg + m)  # (B, B, B)
+        # Mask: valid triple = (i,j) positive AND (i,k) negative
+        valid = mask_pos.unsqueeze(2) * mask_neg.unsqueeze(0)  # (B, B, B)
+        violation = violation * valid
+        total = violation.sum()
+        count = valid.sum().clamp(min=1)
+        return total / count
 
 
 class AsymmetricOrdinalLoss(nn.Module):
@@ -419,6 +412,7 @@ class CombinedLoss(nn.Module):
             self.triplet_loss_fn = AdaptiveTripletLoss(
                 base_margin=getattr(config, 'triplet_base_margin', 1.0),
                 alpha=getattr(config, 'triplet_alpha', 0.05),
+                age_threshold=getattr(config, 'triplet_age_threshold', 3.0),
             )
 
         # M3: Asymmetric Ordinal Loss
