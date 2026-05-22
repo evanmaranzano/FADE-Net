@@ -56,6 +56,57 @@ class BottleneckSPP(nn.Module):
         return self.project(torch.cat(pooled, dim=1))
 
 
+class SobelTextureExtractor(nn.Module):
+    """Extract texture maps using fixed Sobel filters (no trainable params)."""
+
+    def __init__(self):
+        super().__init__()
+        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
+                                dtype=torch.float32).reshape(1, 1, 3, 3)
+        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
+                                dtype=torch.float32).reshape(1, 1, 3, 3)
+        self.register_buffer('weight_x', sobel_x)
+        self.register_buffer('weight_y', sobel_y)
+
+    def forward(self, x):
+        gx = F.conv2d(x, self.weight_x, padding=1)
+        gy = F.conv2d(x, self.weight_y, padding=1)
+        return torch.sqrt(gx ** 2 + gy ** 2 + 1e-6)
+
+
+class TextureEnhanceBranch(nn.Module):
+    """Lightweight branch that extracts high-frequency texture features from
+    Sobel-filtered facial texture maps. Inspired by HEAT (Multimedia Systems 2026)."""
+
+    def __init__(self, out_dim=64):
+        super().__init__()
+        self.sobel = SobelTextureExtractor()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 16, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(16),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+        )
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.project = nn.Sequential(
+            nn.Linear(64, out_dim),
+            nn.Hardswish(),
+        )
+        self.out_dim = out_dim
+
+    def forward(self, x_rgb):
+        gray = 0.299 * x_rgb[:, 0:1] + 0.587 * x_rgb[:, 1:2] + 0.114 * x_rgb[:, 2:3]
+        texture_map = self.sobel(gray)
+        feat = self.encoder(texture_map)
+        feat = self.pool(feat).flatten(1)
+        return self.project(feat)
+
+
 class LightweightAgeEstimator(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -135,7 +186,17 @@ class LightweightAgeEstimator(nn.Module):
                 nn.Hardswish(),
             )
 
-        classifier_input_dim = semantic_dim + (fusion_out_dim if self.use_multi_scale else 0)
+        # M1: Texture Enhancement Branch
+        self.use_texture_branch = bool(getattr(config, "use_texture_branch", False))
+        if self.use_texture_branch:
+            print("[Model] Texture Enhancement Branch: ENABLED")
+            self.texture_branch = TextureEnhanceBranch(out_dim=64)
+            texture_dim = self.texture_branch.out_dim
+        else:
+            print("[Model] Texture Enhancement Branch: DISABLED")
+            texture_dim = 0
+
+        classifier_input_dim = semantic_dim + (fusion_out_dim if self.use_multi_scale else 0) + texture_dim
         self.final_head = nn.Sequential(
             nn.Linear(classifier_input_dim, 1024),
             nn.Hardswish(),
@@ -168,5 +229,9 @@ class LightweightAgeEstimator(nn.Module):
         if self.use_multi_scale:
             texture = self._fuse_multi_scale(captured)
             semantic = torch.cat([semantic, texture], dim=1)
+
+        if self.use_texture_branch:
+            texture_feat = self.texture_branch(x)
+            semantic = torch.cat([semantic, texture_feat], dim=1)
 
         return self.final_head(semantic)
