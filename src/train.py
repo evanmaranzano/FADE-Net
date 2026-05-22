@@ -254,6 +254,26 @@ def train(args):
         cfg.use_mv_loss = args.use_mv
         print(f"🔧 CLI Override: Mean-Variance Loss -> {cfg.use_mv_loss}")
 
+    if getattr(args, 'use_texture', None) is not None:
+        cfg.use_texture_branch = args.use_texture
+        print(f"🔧 CLI Override: Texture Branch -> {cfg.use_texture_branch}")
+
+    if getattr(args, 'use_triplet', None) is not None:
+        cfg.use_adaptive_triplet = args.use_triplet
+        print(f"🔧 CLI Override: Adaptive Triplet -> {cfg.use_adaptive_triplet}")
+
+    if getattr(args, 'use_asym', None) is not None:
+        cfg.use_asymmetric_ordinal = args.use_asym
+        print(f"🔧 CLI Override: Asymmetric Ordinal -> {cfg.use_asymmetric_ordinal}")
+
+    if getattr(args, 'use_freq', None) is not None:
+        cfg.use_freq_attention = args.use_freq
+        print(f"🔧 CLI Override: Freq Attention -> {cfg.use_freq_attention}")
+
+    if getattr(args, 'use_moe', None) is not None:
+        cfg.use_moe = args.use_moe
+        print(f"🔧 CLI Override: MoE Head -> {cfg.use_moe}")
+
     # 🌱 Easter Egg: Print Seed Meaning
     if seed in cfg.ACADEMIC_SEEDS:
         print(f"✨ Seed {seed}: {cfg.ACADEMIC_SEEDS[seed]}")
@@ -800,6 +820,16 @@ if __name__ == "__main__":
         parser.add_argument('--no-spp', dest='spp_false', action='store_true', help='Disable SPP')
         parser.add_argument('--mv', action='store_true', help='Enable Mean-Variance Loss')
         parser.add_argument('--no-mv', dest='mv_false', action='store_true', help='Disable MV Loss')
+        parser.add_argument('--texture', action='store_true', help='Enable texture enhancement branch')
+        parser.add_argument('--no-texture', dest='texture_false', action='store_true', help='Disable texture branch')
+        parser.add_argument('--triplet', action='store_true', help='Enable adaptive triplet loss')
+        parser.add_argument('--no-triplet', dest='triplet_false', action='store_true', help='Disable adaptive triplet loss')
+        parser.add_argument('--asym', action='store_true', help='Enable asymmetric ordinal loss')
+        parser.add_argument('--no-asym', dest='asym_false', action='store_true', help='Disable asymmetric ordinal loss')
+        parser.add_argument('--freq', action='store_true', help='Enable frequency-domain attention')
+        parser.add_argument('--no-freq', dest='freq_false', action='store_true', help='Disable frequency-domain attention')
+        parser.add_argument('--moe', action='store_true', help='Enable Mixture of Experts head')
+        parser.add_argument('--no-moe', dest='moe_false', action='store_true', help='Disable MoE head')
 
         args = parser.parse_args()
 
@@ -842,6 +872,41 @@ if __name__ == "__main__":
             args.use_mv = True
         else:
             args.use_mv = None
+
+        if args.texture_false:
+            args.use_texture = False
+        elif args.texture:
+            args.use_texture = True
+        else:
+            args.use_texture = None
+
+        if args.triplet_false:
+            args.use_triplet = False
+        elif args.triplet:
+            args.use_triplet = True
+        else:
+            args.use_triplet = None
+
+        if args.asym_false:
+            args.use_asym = False
+        elif args.asym:
+            args.use_asym = True
+        else:
+            args.use_asym = None
+
+        if args.freq_false:
+            args.use_freq = False
+        elif args.freq:
+            args.use_freq = True
+        else:
+            args.use_freq = None
+
+        if args.moe_false:
+            args.use_moe = False
+        elif args.moe:
+            args.use_moe = True
+        else:
+            args.use_moe = None
 
         torch.backends.cudnn.benchmark = True
         train(args)

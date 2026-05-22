@@ -12,6 +12,13 @@ class Config:
     use_multi_scale = True       # MSFF: Texture-Semantics Dual-Stream
     use_spp = True               # SPP: Bottleneck SPP v2 (Global-Local Fusion)
 
+    # --- 1.0.1 New Innovation Modules ---
+    use_texture_branch = False   # M1: High-frequency texture enhancement branch
+    use_adaptive_triplet = False # M2: Adaptive triplet loss
+    use_asymmetric_ordinal = False  # M3: Asymmetric ordinal loss
+    use_freq_attention = False   # M4: Frequency-domain attention (DCT)
+    use_moe = False              # M5: Age-aware Mixture of Experts head
+
     # --- 1.0 Backbone Adapter ---
     # Primary backbone: MobileNetV4-Small via timm (2024 architecture, built-in attention).
     # HA (CoordAtt injection) is not applicable to timm backbones — V4 already has
@@ -59,6 +66,9 @@ class Config:
         if self.use_multi_scale:      tags.append("MSFF")
         if self.use_spp:              tags.append("SPP")
         if getattr(self, 'use_mv_loss', False): tags.append("MV")
+        if getattr(self, 'use_texture_branch', False): tags.append("TEX")
+        if getattr(self, 'use_freq_attention', False): tags.append("FREQ")
+        if getattr(self, 'use_moe', False): tags.append("MOE")
         
         suffix = "_".join(tags) if tags else "Baseline"
         return f"{base}_{suffix}"
