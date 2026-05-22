@@ -315,6 +315,50 @@ class MeanVarianceLoss(nn.Module):
         # 总损失
         return l_mean + self.lambda_var * l_var
 
+class AdaptiveTripletLoss(nn.Module):
+    """Adaptive Triplet Loss with dynamic margin based on age difference.
+    margin = base_margin * (1 + alpha * |age_diff|)
+    Inspired by HEAT (Multimedia Systems 2026)."""
+
+    def __init__(self, base_margin=1.0, alpha=0.05):
+        super().__init__()
+        self.base_margin = base_margin
+        self.alpha = alpha
+
+    def forward(self, embeddings, ages):
+        B = embeddings.shape[0]
+        if B < 2:
+            return torch.tensor(0.0, device=embeddings.device)
+        # Pairwise distances
+        dist = torch.cdist(embeddings, embeddings, p=2)
+        # Pairwise age differences
+        age_diff = torch.abs(ages.unsqueeze(0) - ages.unsqueeze(1))
+        # Triplet loss: for each anchor, positive (close age), negative (far age)
+        mask_pos = age_diff < 3.0
+        mask_neg = age_diff >= 3.0
+        loss = torch.tensor(0.0, device=embeddings.device)
+        count = 0
+        for i in range(B):
+            pos_idx = mask_pos[i].nonzero(as_tuple=True)[0]
+            neg_idx = mask_neg[i].nonzero(as_tuple=True)[0]
+            if len(pos_idx) == 0 or len(neg_idx) == 0:
+                continue
+            for j in pos_idx:
+                if i == j:
+                    continue
+                d_pos = dist[i, j]
+                for k in neg_idx:
+                    d_neg = dist[i, k]
+                    m = self.base_margin * (1.0 + self.alpha * age_diff[i, k])
+                    violation = d_pos - d_neg + m
+                    if violation > 0:
+                        loss += violation
+                        count += 1
+        if count > 0:
+            loss = loss / count
+        return loss
+
+
 class CombinedLoss(nn.Module):
     def __init__(self, config, weights=None):
         super(CombinedLoss, self).__init__()
@@ -344,6 +388,15 @@ class CombinedLoss(nn.Module):
                                                end_age=config.max_age,
                                                device=config.device)
             # print("☢️ [Loss] Mean-Variance Loss: ENABLED")
+
+        # M2: Adaptive Triplet Loss
+        self.use_adaptive_triplet = getattr(config, 'use_adaptive_triplet', False)
+        if self.use_adaptive_triplet:
+            self.lambda_triplet = getattr(config, 'lambda_triplet', 0.1)
+            self.triplet_loss_fn = AdaptiveTripletLoss(
+                base_margin=getattr(config, 'triplet_base_margin', 1.0),
+                alpha=getattr(config, 'triplet_alpha', 0.05),
+            )
 
     def forward(self, log_probs, target_dists, true_ages, logits):
         # 1. KL 散度 (Main Loss)
@@ -388,7 +441,15 @@ class CombinedLoss(nn.Module):
             term_mv = self.lambda_mv * loss_mv
         else:
             term_mv = 0.0
-        
+
+        # M2: Adaptive Triplet Loss
+        loss_triplet = torch.tensor(0.0).to(log_probs.device)
+        if self.use_adaptive_triplet:
+            loss_triplet = self.triplet_loss_fn(logits, true_ages)
+            term_triplet = self.lambda_triplet * loss_triplet
+        else:
+            term_triplet = 0.0
+
         # 总损失
-        total_loss = w_kl + self.lambda_l1 * l1 + term_rank + term_mv
-        return total_loss, w_kl.item(), l1.item(), rank_loss.item(), loss_mv.item()
+        total_loss = w_kl + self.lambda_l1 * l1 + term_rank + term_mv + term_triplet
+        return total_loss, w_kl.item(), l1.item(), rank_loss.item(), loss_mv.item(), loss_triplet.item()

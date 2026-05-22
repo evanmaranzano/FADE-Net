@@ -90,6 +90,11 @@ class Config:
     # Mean-Variance Loss (Nuclear Weapon)
     use_mv_loss = True
     lambda_mv = 0.1
+
+    # Adaptive Triplet Loss (M2)
+    lambda_triplet = 0.1
+    triplet_base_margin = 1.0
+    triplet_alpha = 0.05
     
     # Label-Level Perturbation (Sigma Jitter)
     use_sigma_jitter = True
