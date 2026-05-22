@@ -95,6 +95,12 @@ class Config:
     lambda_triplet = 0.1
     triplet_base_margin = 1.0
     triplet_alpha = 0.05
+
+    # Asymmetric Ordinal Loss (M3)
+    lambda_asym = 0.1
+    asym_under_weight = 2.0
+    asym_over_weight = 1.0
+    asym_delta = 1.0
     
     # Label-Level Perturbation (Sigma Jitter)
     use_sigma_jitter = True

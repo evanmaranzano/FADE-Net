@@ -359,6 +359,29 @@ class AdaptiveTripletLoss(nn.Module):
         return loss
 
 
+class AsymmetricOrdinalLoss(nn.Module):
+    """Asymmetric ordinal loss that penalizes under-estimation more than over-estimation
+    (or vice versa). Uses smooth L1 (Huber) with direction-dependent weights.
+    Inspired by CAP-WAE (2025)."""
+
+    def __init__(self, under_weight=2.0, over_weight=1.0, delta=1.0):
+        super().__init__()
+        self.under_weight = under_weight
+        self.over_weight = over_weight
+        self.delta = delta
+
+    def forward(self, pred_ages, true_ages):
+        diff = pred_ages - true_ages
+        weights = torch.where(diff < 0, self.under_weight, self.over_weight)
+        abs_diff = torch.abs(diff)
+        loss = torch.where(
+            abs_diff < self.delta,
+            0.5 * abs_diff ** 2 / self.delta,
+            abs_diff - 0.5 * self.delta,
+        )
+        return (weights * loss).mean()
+
+
 class CombinedLoss(nn.Module):
     def __init__(self, config, weights=None):
         super(CombinedLoss, self).__init__()
@@ -398,6 +421,16 @@ class CombinedLoss(nn.Module):
                 alpha=getattr(config, 'triplet_alpha', 0.05),
             )
 
+        # M3: Asymmetric Ordinal Loss
+        self.use_asymmetric_ordinal = getattr(config, 'use_asymmetric_ordinal', False)
+        if self.use_asymmetric_ordinal:
+            self.lambda_asym = getattr(config, 'lambda_asym', 0.1)
+            self.asym_loss_fn = AsymmetricOrdinalLoss(
+                under_weight=getattr(config, 'asym_under_weight', 2.0),
+                over_weight=getattr(config, 'asym_over_weight', 1.0),
+                delta=getattr(config, 'asym_delta', 1.0),
+            )
+
     def forward(self, log_probs, target_dists, true_ages, logits):
         # 1. KL 散度 (Main Loss)
         kl = self.kl_loss(log_probs, target_dists)
@@ -421,7 +454,12 @@ class CombinedLoss(nn.Module):
              l1 = (l1_element * batch_weights).mean()
         else:
              l1 = F.l1_loss(pred_age, true_ages)
-        
+
+        # M3: Asymmetric Ordinal Loss (replaces L1 when enabled)
+        if self.use_asymmetric_ordinal:
+            asym_loss = self.asym_loss_fn(pred_age, true_ages)
+            l1 = self.lambda_asym * asym_loss
+
         # 4. Rank Loss (CDF Loss / EMD)
         # 注意: OrderRegressionLoss 内部实现了 CDF MSE
         if self.use_dldl_v2 and self.rank_loss_fn is not None:
