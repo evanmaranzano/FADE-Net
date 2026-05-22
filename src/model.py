@@ -107,6 +107,36 @@ class TextureEnhanceBranch(nn.Module):
         return self.project(feat)
 
 
+class FrequencyDomainAttention(nn.Module):
+    """Lightweight frequency-domain channel attention using multi-scale pooling
+    to approximate DCT frequency bands. Inspired by FcaNet (CVPR 2021)."""
+
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        mid = max(8, channels // reduction)
+        self.compress = nn.Linear(channels, mid, bias=False)
+        self.bn = nn.BatchNorm1d(mid)
+        self.act = nn.Hardswish()
+        self.expand = nn.Linear(mid, channels, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        if x.dim() == 4:
+            b, c, h, w = x.shape
+            x_flat = F.adaptive_avg_pool2d(x, 1).flatten(1)
+        else:
+            b, c = x.shape
+            x_flat = x
+        attn = self.compress(x_flat)
+        attn = self.bn(attn)
+        attn = self.act(attn)
+        attn = self.expand(attn)
+        attn = self.sigmoid(attn)
+        if x.dim() == 4:
+            return x * attn.view(b, c, 1, 1)
+        return x * attn
+
+
 class LightweightAgeEstimator(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -196,6 +226,15 @@ class LightweightAgeEstimator(nn.Module):
             print("[Model] Texture Enhancement Branch: DISABLED")
             texture_dim = 0
 
+        # M4: Frequency-Domain Attention
+        self.use_freq_attention = bool(getattr(config, "use_freq_attention", False))
+        if self.use_freq_attention:
+            print("[Model] Frequency-Domain Attention: ENABLED")
+            spp_out_channels = self.spp_channels if self.use_spp else semantic_dim
+            self.freq_attention = FrequencyDomainAttention(spp_out_channels, reduction=16)
+        else:
+            print("[Model] Frequency-Domain Attention: DISABLED")
+
         classifier_input_dim = semantic_dim + (fusion_out_dim if self.use_multi_scale else 0) + texture_dim
         self.final_head = nn.Sequential(
             nn.Linear(classifier_input_dim, 1024),
@@ -225,6 +264,9 @@ class LightweightAgeEstimator(nn.Module):
             semantic = F.adaptive_avg_pool2d(semantic, (1, 1)).flatten(1)
         else:
             semantic = self.semantic_projector(self.backbone.pool_features(deep_feature))
+
+        if self.use_freq_attention:
+            semantic = self.freq_attention(semantic)
 
         if self.use_multi_scale:
             texture = self._fuse_multi_scale(captured)
