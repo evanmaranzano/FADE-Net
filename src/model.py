@@ -137,6 +137,38 @@ class FrequencyDomainAttention(nn.Module):
         return x * attn
 
 
+class AgeMoEHead(nn.Module):
+    """Age-aware Mixture of Experts head.
+    A lightweight gating network routes features to specialized expert FC heads,
+    enabling different experts to focus on different age ranges."""
+
+    def __init__(self, in_dim, num_classes, num_experts=3, hidden_dim=256, dropout=0.35):
+        super().__init__()
+        self.num_experts = num_experts
+        self.gate = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.Hardswish(),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_dim, num_experts),
+        )
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
+                nn.Hardswish(),
+                nn.Dropout(p=dropout),
+                nn.Linear(hidden_dim, num_classes),
+            )
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, x):
+        gate_logits = self.gate(x)
+        gate_weights = F.softmax(gate_logits, dim=1)  # (B, num_experts)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)  # (B, num_experts, num_classes)
+        out = (gate_weights.unsqueeze(-1) * expert_outputs).sum(dim=1)  # (B, num_classes)
+        return out
+
+
 class LightweightAgeEstimator(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -236,12 +268,25 @@ class LightweightAgeEstimator(nn.Module):
             print("[Model] Frequency-Domain Attention: DISABLED")
 
         classifier_input_dim = semantic_dim + (fusion_out_dim if self.use_multi_scale else 0) + texture_dim
-        self.final_head = nn.Sequential(
-            nn.Linear(classifier_input_dim, 1024),
-            nn.Hardswish(),
-            nn.Dropout(p=dropout),
-            nn.Linear(1024, num_classes),
-        )
+
+        # M5: MoE Head
+        self.use_moe = bool(getattr(config, "use_moe", False))
+        if self.use_moe:
+            print("[Model] MoE Head: ENABLED")
+            self.final_head = AgeMoEHead(
+                classifier_input_dim, num_classes,
+                num_experts=getattr(config, "moe_num_experts", 3),
+                hidden_dim=1024,
+                dropout=dropout,
+            )
+        else:
+            print("[Model] MoE Head: DISABLED")
+            self.final_head = nn.Sequential(
+                nn.Linear(classifier_input_dim, 1024),
+                nn.Hardswish(),
+                nn.Dropout(p=dropout),
+                nn.Linear(1024, num_classes),
+            )
 
     def _fuse_multi_scale(self, captured):
         shallow = captured[self.msff_indices[0]]
