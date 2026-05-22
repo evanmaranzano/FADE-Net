@@ -1,10 +1,12 @@
 # 摘要
 
+> **当前使用说明（2026-05-22）**：本文是早期论文草稿，数据量、seed结果和部署表述未按当前metadata-aware实验协议重新核验。当前投稿主线应以 `docs/thesis_draft.md`、`docs/paper_core_claims.md` 和最新训练/筛选日志为准；本文保留作历史参考，不直接作为最终论文结论来源。
+
 人脸年龄估计是计算机视觉中的典型细粒度回归任务，在智慧零售、安防监控、人机交互、身份认证和数字娱乐等场景中具有较高的应用价值。随着边缘计算与移动端视觉应用的发展，模型不仅需要具备较好的年龄预测精度，还需要在参数规模、推理开销与部署成本之间取得平衡。现有高精度方法通常依赖 VGG、ResNet 或 Transformer 等较重的特征提取网络，虽然在公开数据集上能够获得较低的平均绝对误差，但其参数量和计算量较大，不利于部署在资源受限的终端环境中。围绕这一问题，本文研究一种基于注意力机制的轻量化人脸年龄估计方法。
 
 本文以 MobileNetV3-Large 为基础骨干网络，构建了名为 FADE-Net 的轻量级年龄估计模型。针对年龄线索同时具有局部纹理性与全局结构性的特点，模型在深层阶段采用 Pyramid Attention Injection 策略，将骨干网络最后 4 个含有 SE 结构的模块替换为 Coordinate Attention，以增强空间位置敏感性；在中间层引入纹理与语义双流融合结构，分别从 Block 6 和 Block 12 提取不同尺度的表征，再通过可学习权重实现特征融合；在深层语义分支后加入 Bottleneck Spatial Pyramid Pooling 模块，以较低额外代价引入多尺度上下文；在训练目标上结合标签分布学习、L1 约束、CDF ranking 损失和 Mean-Variance loss，用于缓解年龄标签模糊、序关系弱化和分布过宽等问题。
 
-实验基于预处理后的 AFAD 数据集开展。目录扫描结果表明，实验数据共包含 163373 张图像，年龄目录范围覆盖 15 至 75 岁，其中实际非空样本主要分布在 15 至 72 岁之间。数据划分采用分层 72-8-20 协议，训练集、验证集和测试集样本数分别为 117603、13039 和 32731。根据实验结果文件，FADE-Net 的最佳单模型在 seed1337 下取得 3.0574 的测试集 MAE；seed42 与 seed2026 的结果分别为 3.0951 和 3.1047，三次实验均值为 3.0857，标准差为 0.0204。模型总参数量经实际计数为 4.8415M，可记为 4.84M。结果说明该方法在保持较低参数规模的同时，能够获得具有竞争力的年龄估计性能。
+实验基于预处理后的 AFAD 数据集开展。目录扫描结果表明，实验数据共包含 163373 张图像，年龄目录范围覆盖 15 至 75 岁，其中实际非空样本主要分布在 15 至 72 岁之间。数据划分采用分层 72-8-20 协议，训练集、验证集和测试集样本数分别为 117603、13039 和 32731。早期结果文件曾记录 FADE-Net 在 seed1337 下取得 3.0574 的测试集 MAE；seed42 与 seed2026 的结果分别为 3.0951 和 3.1047，三次实验均值为 3.0857，标准差为 0.0204。上述数值尚未按当前 metadata-aware 实验协议重新核验，正式论文应以重跑后的 split fingerprint、checkpoint metadata 和最终结果文件为准。
 
 本文的工作价值主要体现在两个方面：一方面，从结构设计上验证了轻量骨干网络与注意力、多尺度融合、标签分布学习相结合的有效性；另一方面，从工程实现角度给出了较完整的训练、验证与测试流程，为进一步扩展可视化分析与补充对比实验提供了稳定基础。
 
@@ -16,9 +18,9 @@ Lightweight face age estimation is an important research topic in computer visio
 
 The proposed model, named FADE-Net, is built on MobileNetV3-Large and introduces several task-oriented improvements. First, a Pyramid Attention Injection strategy replaces the last four squeeze-and-excitation modules in the deep layers with Coordinate Attention, improving spatial sensitivity to age-related facial regions. Second, a texture-semantic dual-stream fusion branch is designed to capture both local wrinkle patterns and global facial structure from intermediate layers. Third, a bottleneck spatial pyramid pooling module is inserted before the prediction head to aggregate multi-scale contextual information with limited extra parameters. In addition, the training objective combines label distribution learning, L1 supervision, CDF ranking loss, and mean-variance loss to better model age ambiguity and ordinal relationships.
 
-Experiments are conducted on the processed AFAD dataset. The scanned dataset contains 163373 images, with directory labels ranging from 15 to 75 years old and effective non-empty samples mainly covering 15 to 72 years old. A stratified 72-8-20 protocol is adopted, producing 117603 training samples, 13039 validation samples, and 32731 test samples. According to the result files, the best single model achieves a test MAE of 3.0574 with seed1337, while seed42 and seed2026 obtain 3.0951 and 3.1047 respectively. The multi-seed mean result is 3.0857 with a standard deviation of 0.0204. The actual parameter count of FADE-Net is 4.8415 million, showing that the proposed method maintains a good balance between accuracy and lightweight design.
+Experiments are conducted on the processed AFAD dataset. The scanned dataset contains 163373 images, with directory labels ranging from 15 to 75 years old and effective non-empty samples mainly covering 15 to 72 years old. A stratified 72-8-20 protocol is adopted, producing 117603 training samples, 13039 validation samples, and 32731 test samples. Early internal result files recorded a test MAE of 3.0574 with seed1337, while seed42 and seed2026 obtained 3.0951 and 3.1047 respectively. These historical numbers have not yet been revalidated under the current metadata-aware protocol, so formal paper tables should rely on rerun evidence with matching split fingerprint, checkpoint metadata, and final result files.
 
-The results indicate that a carefully designed lightweight backbone, combined with attention injection, multi-scale fusion and distribution-aware supervision, can provide a feasible solution for efficient face age estimation in resource-constrained scenarios.
+These historical records suggest that a carefully designed lightweight backbone, combined with attention injection, multi-scale fusion and distribution-aware supervision, is worth further validation for efficient face age estimation in resource-constrained scenarios.
 
 Keywords: face age estimation; lightweight network; attention mechanism; label distribution learning; deep learning
 
@@ -267,7 +269,7 @@ $$
 
 ## 4.3 主要实验结果
 
-根据结果文件，FADE-Net 在不同随机种子下的测试集 MAE 如表 4-4 所示。可以看到，模型在三个随机种子下的差异较小，表明其训练过程具有较好的稳定性。最佳单模型出现在 seed1337，对应测试集 MAE 为 3.0574；三次实验均值为 3.0857，标准差为 0.0204。
+根据历史结果文件，FADE-Net 在不同随机种子下的测试集 MAE 曾记录如表 4-4 所示。该表仅作为早期内部记录，尚未按当前 metadata-aware split、checkpoint 和 TTA 协议重新复核，不能直接进入正式论文主表。最佳单模型历史记录出现在 seed1337，对应测试集 MAE 为 3.0574；三次实验均值为 3.0857，标准差为 0.0204。
 
 | Seed | 测试集 MAE |
 |---|---:|
@@ -276,9 +278,9 @@ $$
 | 2026 | 3.1047 |
 | 平均值 ± 标准差 | 3.0857 ± 0.0204 |
 
-表 4-4 多 seed 测试结果
+表 4-4 多 seed 测试历史记录
 
-本文将 seed1337 的结果作为最佳单模型性能，而将三 seed 结果作为补充稳定性分析。这样既能够突出模型的最佳表现，也能体现结果并非偶然。由于当前并未将集成结果作为统一比较口径，正文不直接引用 3.02 这一数值，以避免与单模型结果混淆。
+正式论文应以当前协议重新生成的三 seed 结果作为主表证据。seed1337 的历史结果可保留为内部参考，但在 split fingerprint、checkpoint metadata 和最终结果文件三者一致前，不应作为正式最佳单模型性能引用。由于当前并未将集成结果作为统一比较口径，正文不直接引用 3.02 这一数值，以避免与单模型结果混淆。
 
 为便于与典型年龄估计方法进行横向比较，本文参考公开文献中常见的 AFAD 指标，构造如表 4-5 所示的结果对比表。需要说明的是，不同文献在预处理、数据划分与评测协议上可能存在差异，因此该表更适合作为结果对照背景，而不是绝对严格的一一复现实验。
 
@@ -290,11 +292,11 @@ $$
 | CORAL | ResNet-34 | 21.8M | 3.48 |
 | CDCNN | Multi-Task CNN | - | 3.11 |
 | GRANET | ResNet-50 | 25.5M | 3.10 |
-| FADE-Net（最佳单模型） | MobileNetV3-Large | 4.84M | 3.0574 |
+| FADE-Net（历史单模型记录） | MobileNetV3-Large | 4.84M | 3.0574 |
 
-表 4-5 AFAD 上的主要方法结果对比
+表 4-5 AFAD 上的主要方法结果参考
 
-从表 4-5 可以看出，FADE-Net 在参数规模远低于 VGG 和 ResNet 系列模型的情况下，依然取得了具有竞争力的 MAE。这表明针对年龄估计任务定制轻量结构，比单纯依赖更深更大的通用模型更具实际部署价值。
+表 4-5 只能说明历史内部记录与公开文献结果处于相近量级。若要证明 FADE-Net 在参数规模远低于 VGG 和 ResNet 系列模型的情况下仍具有竞争力，需要在当前统一协议下重跑并核验日志、checkpoint 和 split metadata。
 
 ## 4.4 参数规模与训练过程分析
 
@@ -342,9 +344,9 @@ $$
 
 在方法部分，本文重点介绍了 FADE-Net 的几项核心设计：一是在 MobileNetV3-Large 深层使用 Pyramid Attention Injection，将最后 4 个 SE 模块替换为 Coordinate Attention；二是从 Block 6 和 Block 12 提取纹理与语义特征，并通过可学习权重进行双流融合；三是在深层语义分支中加入 Bottleneck SPP，以低成本引入多尺度上下文；四是基于标签分布学习、L1、CDF ranking 和 Mean-Variance loss 构建组合损失，从而增强模型对年龄模糊性和序关系的建模能力。
 
-在实验部分，本文采用 AFAD 分层 72-8-20 协议，对结果文件进行了统一整理与分析。结果显示，模型在 seed1337 下取得 3.0574 的最佳单模型 MAE，三次实验均值为 3.0857 ± 0.0204，参数量仅为 4.8415M。这说明所提出的轻量化结构具备较好的精度效率平衡，为移动端与边缘端人脸年龄估计提供了一种可行方案。
+在实验部分，本文采用 AFAD 分层 72-8-20 协议，对结果文件进行了统一整理与分析。历史内部记录显示，模型在 seed1337 下曾取得 3.0574 的单模型 MAE，三次实验均值为 3.0857 ± 0.0204，参数量约为 4.8415M。上述数值仍需按当前 metadata-aware 实验协议复核后，才能作为正式论文主表证据。
 
-总体来看，现有结果较好地支撑了本文的研究思路。实验分析表明，面向年龄估计任务进行轻量化与任务特定增强设计，能够在不显著增加结构复杂度的前提下取得稳定有效的性能收益。
+总体来看，现有内部记录提示该研究思路具备继续推进价值。是否能够证明稳定有效的性能收益，还需要补齐同协议三种子重跑、完整消融和可复核的日志证据链。
 
 ## 5.2 后续展望
 

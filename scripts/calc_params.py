@@ -1,6 +1,7 @@
 import torch
 import sys
 import os
+import argparse
 
 # Add project root to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -9,9 +10,26 @@ from src.config import Config
 from src.model import LightweightAgeEstimator
 from thop import profile, clever_format
 
+def apply_common_overrides(cfg, args):
+    if args.backbone_source is not None:
+        cfg.backbone_source = args.backbone_source
+    if args.backbone_name is not None:
+        cfg.backbone_name = args.backbone_name
+    if args.no_pretrained:
+        cfg.backbone_pretrained = False
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Count FADE-Net parameters and FLOPs")
+    parser.add_argument('--backbone_source', type=str, choices=['torchvision', 'timm'], help='Backbone provider')
+    parser.add_argument('--backbone_name', type=str, help='Backbone model name')
+    parser.add_argument('--no_pretrained', action='store_true', help='Disable pretrained backbone weights')
+    args = parser.parse_args()
+
     cfg = Config()
+    apply_common_overrides(cfg, args)
     model = LightweightAgeEstimator(cfg)
+    model.eval()
     
     # 1. Basic Count
     total_params = sum(p.numel() for p in model.parameters())
@@ -29,7 +47,8 @@ def main():
         print(f"FLOPs: {flops_fmt}")
         print(f"Params (THOP): {params_fmt}")
     except Exception as e:
-        print(f"THOP calculation failed (optional): {e}")
+        print(f"FLOPs: unavailable")
+        print(f"THOP calculation failed: {e}")
 
 if __name__ == "__main__":
     main()

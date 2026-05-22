@@ -6,10 +6,29 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 class Config:
     # --- 1. 🔬 Ablation Switch (消融实验核心开关) ---
-    use_hybrid_attention = True  # HA: Coordinate Attention
+    # NOTE: use_hybrid_attention has no effect on timm backbones (V4 has built-in attention).
+    use_hybrid_attention = True  # HA: Coordinate Attention (torchvision backbone only)
     use_dldl_v2 = True           # DLDL: Adaptive Sigma + Rank Loss
     use_multi_scale = True       # MSFF: Texture-Semantics Dual-Stream
     use_spp = True               # SPP: Bottleneck SPP v2 (Global-Local Fusion)
+
+    # --- 1.0 Backbone Adapter ---
+    # Primary backbone: MobileNetV4-Small via timm (2024 architecture, built-in attention).
+    # HA (CoordAtt injection) is not applicable to timm backbones — V4 already has
+    # efficient attention. Ablation focuses on MSFF / SPP / DLDL / MV modules.
+    backbone_source = "timm"
+    backbone_name = "mobilenetv4_conv_small"
+    backbone_pretrained = True
+    experiment_tag = None
+    split_file_tag = None
+    allow_legacy_split_upgrade = False
+    head_version = "fade-head-v1"
+    hybrid_attention_blocks = 4
+    msff_feature_indices = (6, 12)
+    fusion_dim = 64
+    fusion_out_dim = 128
+    spp_channels = 512
+    semantic_dim = 1280
     
     # --- 1.1 📊 Split Protocol (New) ---
     # Options: '80-10-10' (Our Best), '90-5-5' (Legacy), or '72-8-20' (Standard 80-20 implementation)
@@ -30,7 +49,12 @@ class Config:
     def project_name(self):
         base = "FADE-Net"
         tags = []
-        if self.use_hybrid_attention: tags.append("HA")
+        replaced_blocks = getattr(self, "hybrid_attention_replaced_blocks", None)
+        if replaced_blocks is None:
+            effective_ha = self.use_hybrid_attention and self.backbone_source != "timm"
+        else:
+            effective_ha = bool(replaced_blocks)
+        if effective_ha: tags.append("HA")
         if self.use_dldl_v2:          tags.append("DLDL")
         if self.use_multi_scale:      tags.append("MSFF")
         if self.use_spp:              tags.append("SPP")
@@ -90,8 +114,8 @@ class Config:
     # 数据集开关 (AFAD Only)
     use_afad = True
 
-    # 数据集路径 relative to ROOT_DIR
-    afad_dir = os.path.join(ROOT_DIR, "datasets", "AFAD")
+    # 数据集路径 relative to ROOT_DIR; can be overridden without editing code.
+    afad_dir = os.environ.get("FADE_NET_AFAD_DIR", os.path.join(ROOT_DIR, "datasets", "AFAD"))
     
     # LDS (标签分布平滑)
     use_reweighting = True

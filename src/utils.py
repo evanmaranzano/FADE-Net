@@ -391,4 +391,4 @@ class CombinedLoss(nn.Module):
         
         # 总损失
         total_loss = w_kl + self.lambda_l1 * l1 + term_rank + term_mv
-        return total_loss, w_kl.item(), l1.item(), rank_loss.item()
+        return total_loss, w_kl.item(), l1.item(), rank_loss.item(), loss_mv.item()

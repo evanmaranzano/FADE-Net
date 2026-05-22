@@ -4,6 +4,8 @@
 **项目名称**: FADE-Net (Feature-fused Hybrid Attention Distribution Estimation Network)
 **审查范围**: `src/` 核心模块 + `scripts/` 工具脚本 + `backup/` 历史代码
 
+> **当前使用说明（2026-05-22）**：本文是历史审查材料，包含旧版性能判断和“SOTA/服务器级精度”等表述。当前论文与README应以 `docs/paper_core_claims.md`、`docs/backbone_screening.md` 和最新实验日志为准；本文中的性能数字只能作为待复核线索，不能直接写入论文结论。
+
 ---
 
 ## 📋 目录

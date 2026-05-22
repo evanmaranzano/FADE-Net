@@ -13,7 +13,6 @@ import os
 import sys
 import argparse
 import torch
-import torch.nn.functional as F
 
 # Add project root to path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -24,6 +23,16 @@ sys.path.insert(0, os.path.join(ROOT_DIR, 'src'))
 from config import Config
 from model import LightweightAgeEstimator
 from dataset import get_dataloaders
+from experiment import (
+    artifact_path,
+    build_training_metadata,
+    checkpoint_metadata_mismatches,
+    load_model_state_package,
+)
+from evaluation import TTA_MODES, evaluate_mae
+
+
+DEFAULT_SWA_SEEDS = (42, 3407, 2026, 1337)
 
 
 def average_checkpoints(checkpoint_paths, device='cpu'):
@@ -33,11 +42,18 @@ def average_checkpoints(checkpoint_paths, device='cpu'):
     print(f"📊 Averaging {len(checkpoint_paths)} checkpoints...")
     
     avg_state = None
+    metadata = None
     n = len(checkpoint_paths)
     
     for i, path in enumerate(checkpoint_paths):
         print(f"   Loading [{i+1}/{n}]: {os.path.basename(path)}")
         checkpoint = torch.load(path, map_location=device)
+        if not isinstance(checkpoint, dict) or 'model_state_dict' not in checkpoint:
+            raise RuntimeError(f"Checkpoint is not a packaged training checkpoint: {path}")
+        if metadata is None:
+            metadata = checkpoint.get("metadata", {})
+        elif checkpoint.get("metadata", {}) != metadata:
+            raise RuntimeError(f"Checkpoint metadata mismatch; refusing to average: {path}")
         state_dict = checkpoint['model_state_dict']
         
         if avg_state is None:
@@ -50,39 +66,38 @@ def average_checkpoints(checkpoint_paths, device='cpu'):
     for k in avg_state.keys():
         avg_state[k] /= n
     
-    return avg_state
+    return avg_state, metadata
 
 
-def evaluate_model(model, test_loader, config, device):
-    """
-    Evaluate model on test set with TTA.
-    """
-    model.eval()
-    test_mae = 0.0
-    count = 0
-    rank_arange = torch.arange(config.num_classes).to(device)
-    
-    with torch.no_grad():
-        for images, labels, ages in test_loader:
-            images = images.to(device)
-            ages = ages.to(device)
-            
-            # TTA: Original + Horizontal Flip
-            logits = model(images)
-            probs = F.softmax(logits, dim=1)
-            
-            images_flip = torch.flip(images, dims=[3])
-            logits_flip = model(images_flip)
-            probs_flip = F.softmax(logits_flip, dim=1)
-            
-            probs = (probs + probs_flip) / 2.0
-            
-            output_ages = torch.sum(probs * rank_arange.float(), dim=1)
-            mae = torch.abs(output_ages - ages).sum().item()
-            test_mae += mae
-            count += images.size(0)
-    
-    return test_mae / count
+def discover_checkpoint_seeds(root_dir, cfg, epoch=111, candidate_seeds=DEFAULT_SWA_SEEDS):
+    seeds = []
+    for seed in candidate_seeds:
+        if os.path.exists(artifact_path(root_dir, f'checkpoint_epoch_{epoch}', cfg, seed, '.pth')):
+            seeds.append(seed)
+    return seeds
+
+
+def apply_common_overrides(cfg, args):
+    if args.split is not None:
+        cfg.split_protocol = args.split
+    if args.backbone_source is not None:
+        cfg.backbone_source = args.backbone_source
+    if args.backbone_name is not None:
+        cfg.backbone_name = args.backbone_name
+    if args.no_pretrained:
+        cfg.backbone_pretrained = False
+    if args.afad_dir is not None:
+        cfg.afad_dir = os.path.abspath(args.afad_dir)
+    if args.experiment_tag is not None:
+        cfg.experiment_tag = args.experiment_tag
+    if getattr(args, "split_file_tag", None) is not None:
+        cfg.split_file_tag = args.split_file_tag
+    if args.allow_legacy_split_upgrade:
+        cfg.allow_legacy_split_upgrade = True
+
+
+def format_metadata_mismatches(mismatches):
+    return ", ".join([f"{key}: checkpoint={old!r}, current={new!r}" for key, old, new in mismatches])
 
 
 def main():
@@ -90,25 +105,34 @@ def main():
     parser.add_argument('--seed', type=int, default=None, help='Seed to process (default: all available)')
     parser.add_argument('--eval', action='store_true', help='Evaluate SWA model after generation')
     parser.add_argument('--epochs', type=str, default='111-120', help='Epoch range to average (default: 111-120)')
+    parser.add_argument('--split', type=str, choices=['80-10-10', '90-5-5', '72-8-20'], help='Split protocol')
+    parser.add_argument('--backbone_source', type=str, choices=['torchvision', 'timm'], help='Backbone provider')
+    parser.add_argument('--backbone_name', type=str, help='Backbone model name')
+    parser.add_argument('--no_pretrained', action='store_true', help='Disable pretrained backbone weights')
+    parser.add_argument('--afad_dir', type=str, help='Override AFAD dataset directory')
+    parser.add_argument('--experiment_tag', type=str, help='Append tag to experiment id for smoke or side runs')
+    parser.add_argument('--split_file_tag', type=str, help='Use tagged split file/artifact identity')
+    parser.add_argument('--allow_legacy_split_upgrade', action='store_true', help='Trust and stamp a legacy split after size/index validation')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite an existing SWA artifact')
     args = parser.parse_args()
+    cfg = Config()
+    apply_common_overrides(cfg, args)
+    _, _, test_loader, _ = get_dataloaders(cfg)
     
+    # Parse epoch range
+    start_epoch, end_epoch = map(int, args.epochs.split('-'))
+
     # Determine seeds to process
     if args.seed:
         seeds = [args.seed]
     else:
         # Auto-detect available seeds
-        seeds = []
-        for s in [42, 1337, 3407]:
-            if os.path.exists(os.path.join(ROOT_DIR, f'checkpoint_seed{s}_epoch_111.pth')):
-                seeds.append(s)
+        seeds = discover_checkpoint_seeds(ROOT_DIR, cfg, epoch=start_epoch)
         print(f"🔍 Auto-detected seeds: {seeds}")
     
     if not seeds:
         print("❌ No checkpoint files found!")
         return
-    
-    # Parse epoch range
-    start_epoch, end_epoch = map(int, args.epochs.split('-'))
     
     results = {}
     
@@ -120,7 +144,7 @@ def main():
         # Collect checkpoint paths
         checkpoint_paths = []
         for epoch in range(start_epoch, end_epoch + 1):
-            path = os.path.join(ROOT_DIR, f'checkpoint_seed{seed}_epoch_{epoch}.pth')
+            path = artifact_path(ROOT_DIR, f'checkpoint_epoch_{epoch}', cfg, seed, '.pth')
             if os.path.exists(path):
                 checkpoint_paths.append(path)
             else:
@@ -132,33 +156,55 @@ def main():
         
         # Average checkpoints
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        avg_state = average_checkpoints(checkpoint_paths, device)
+        avg_state, metadata = average_checkpoints(checkpoint_paths, device)
+        expected_metadata = build_training_metadata(cfg, seed)
+        mismatches = checkpoint_metadata_mismatches({"metadata": metadata}, expected_metadata)
+        if mismatches:
+            raise RuntimeError(f"SWA checkpoint metadata mismatch; refusing to average current protocol. {format_metadata_mismatches(mismatches)}")
+        metadata = dict(metadata)
+        metadata["swa_requested_epochs"] = list(range(start_epoch, end_epoch + 1))
+        metadata["swa_actual_epochs"] = [
+            int(os.path.basename(path).split("checkpoint_epoch_", 1)[1].split("_", 1)[0])
+            for path in checkpoint_paths
+        ]
+        metadata["swa_checkpoint_paths"] = checkpoint_paths
+        metadata["swa_checkpoint_count"] = len(checkpoint_paths)
         
         # Save SWA model
-        swa_path = os.path.join(ROOT_DIR, f'swa_model_seed{seed}.pth')
-        torch.save(avg_state, swa_path)
+        epoch_tag = f"{start_epoch}_to_{end_epoch}"
+        swa_path = artifact_path(ROOT_DIR, f'swa_model_{epoch_tag}', cfg, seed, '.pth')
+        if os.path.exists(swa_path) and not args.overwrite:
+            raise RuntimeError(f"SWA artifact already exists: {swa_path}. Use --overwrite only after archiving or intentionally replacing it.")
+        torch.save({"model_state_dict": avg_state, "metadata": metadata}, swa_path)
         print(f"✅ SWA model saved: {swa_path}")
         
         # Evaluate if requested
         if args.eval:
             print(f"\n📊 Evaluating SWA model...")
             
-            cfg = Config()
             model = LightweightAgeEstimator(cfg)
             model.load_state_dict(avg_state)
             model.to(device)
             
-            _, _, test_loader, _ = get_dataloaders(cfg)
-            
-            test_mae = evaluate_model(model, test_loader, cfg, device)
-            print(f"🏆 SWA Test MAE (Seed {seed}): {test_mae:.4f}")
+            test_metrics = evaluate_mae(model, test_loader, cfg, device, modes=TTA_MODES)
+            selected_tta = metadata.get("selection_metric", {}).get("tta", "multi")
+            test_mae = test_metrics[selected_tta]
+            print(f"🏆 SWA Test MAE (Seed {seed}, TTA={selected_tta}): {test_mae:.4f}")
+            for mode in TTA_MODES:
+                print(f"   SWA_MAE_{mode}: {test_metrics[mode]:.4f}")
             results[seed] = test_mae
             
             # Compare with original best model
-            best_model_path = os.path.join(ROOT_DIR, f'best_model_FADE-Net_HA_DLDL_MSFF_SPP_MV_seed{seed}.pth')
+            best_model_path = artifact_path(ROOT_DIR, 'best_model', cfg, seed, '.pth')
             if os.path.exists(best_model_path):
-                model.load_state_dict(torch.load(best_model_path, map_location=device))
-                orig_mae = evaluate_model(model, test_loader, cfg, device)
+                best_state, checkpoint = load_model_state_package(best_model_path, device)
+                expected_metadata = build_training_metadata(cfg, seed)
+                mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+                if mismatches:
+                    raise RuntimeError(f"Best model metadata mismatch; refusing comparison. {format_metadata_mismatches(mismatches)}")
+                model.load_state_dict(best_state)
+                orig_metrics = evaluate_mae(model, test_loader, cfg, device, modes=TTA_MODES)
+                orig_mae = orig_metrics[selected_tta]
                 print(f"📋 Original Best MAE: {orig_mae:.4f}")
                 print(f"📈 Improvement: {orig_mae - test_mae:+.4f}")
     

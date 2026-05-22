@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import json
 import random
+import hashlib
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
 from torchvision import transforms
@@ -11,6 +12,16 @@ from utils import DLDLProcessor
 from config import Config, ROOT_DIR
 from collections import Counter, defaultdict
 from scipy.ndimage import gaussian_filter1d
+from experiment import optional_sanitize_token
+
+
+class CachedSplitMetadataMismatchError(ValueError):
+    """Raised when a metadata-backed split no longer matches the current dataset."""
+
+
+class LegacySplitMetadataError(ValueError):
+    """Raised when an unverified legacy split is used without explicit approval."""
+
 
 # ==========================================
 # Collate Function
@@ -21,10 +32,84 @@ def my_collate_fn(batch):
         return torch.tensor([]), torch.tensor([]), torch.tensor([])
     return torch.utils.data.dataloader.default_collate(batch)
 
+
+def dataset_fingerprint(dataset):
+    """Hash dataset order and labels so cached split indices cannot silently drift."""
+    digest = hashlib.sha256()
+    digest.update(str(len(dataset)).encode("utf-8"))
+
+    datasets = getattr(dataset, "datasets", [dataset])
+    for child in datasets:
+        image_paths = getattr(child, "image_paths", None)
+        ages = getattr(child, "ages", None)
+        if image_paths is None or ages is None:
+            digest.update(repr(child).encode("utf-8"))
+            continue
+
+        for path, age in zip(image_paths, ages):
+            norm_path = os.path.normpath(path).replace("\\", "/")
+            relative_tail = "/".join(norm_path.split("/")[-3:])
+            digest.update(f"{float(age):.4f}|{relative_tail}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _validate_split_indices(train_idx, val_idx, test_idx, dataset_len):
+    all_indices = list(train_idx) + list(val_idx) + list(test_idx)
+    if len(all_indices) != dataset_len:
+        raise ValueError(f"Dataset size mismatch (Stored: {len(all_indices)} vs Current: {dataset_len})")
+    if len(set(all_indices)) != len(all_indices):
+        raise ValueError("Cached split contains duplicate indices")
+    if all_indices and (min(all_indices) < 0 or max(all_indices) >= dataset_len):
+        raise ValueError("Cached split contains out-of-range indices")
+
+
+def _split_ratios_match(stored, expected):
+    if stored is None:
+        return True
+    if len(stored) != len(expected):
+        return False
+    return all(abs(float(a) - float(b)) < 1e-8 for a, b in zip(stored, expected))
+
+
+def _split_metadata(dataset_len, split_ratios, dataset_hash):
+    return {
+        'version': 2,
+        'num_samples': dataset_len,
+        'split_ratios': list(split_ratios),
+        'dataset_fingerprint': dataset_hash,
+        'legacy_upgraded': False,
+    }
+
+
+def _write_split_json(save_path, train_indices, val_indices, test_indices, dataset_len, split_ratios, dataset_hash):
+    save_data = {
+        '_metadata': _split_metadata(dataset_len, split_ratios, dataset_hash),
+        'train': train_indices,
+        'val': val_indices,
+        'test': test_indices,
+    }
+    with open(save_path, 'w') as f:
+        json.dump(save_data, f)
+
+
+def split_filename_with_tag(filename, split_file_tag):
+    tag = optional_sanitize_token(split_file_tag)
+    if not tag:
+        return filename
+    stem, extension = os.path.splitext(filename)
+    return f"{stem}_{tag}{extension or '.json'}"
+
 # ==========================================
 # 0. Stratified Split Strategy (The "Platinum" Choice)
 # ==========================================
-def get_stratified_split(dataset, all_ages, split_ratios=(0.80, 0.10, 0.10), save_path=None):
+def get_stratified_split(
+    dataset,
+    all_ages,
+    split_ratios=(0.80, 0.10, 0.10),
+    save_path=None,
+    dataset_hash=None,
+    allow_legacy_split_upgrade=False,
+):
     """
     Perform Stratified Sampling based on age labels.
     Ensures the specified split ratio holds true for *every single age class*.
@@ -36,21 +121,45 @@ def get_stratified_split(dataset, all_ages, split_ratios=(0.80, 0.10, 0.10), sav
     # Check for existing split
     if os.path.exists(save_path):
         print(f"📄 Loading existing stratified split from {save_path}...")
+        metadata_backed_split = False
         try:
             with open(save_path, "r") as f:
                 indices_dict = json.load(f)
             train_idx = indices_dict['train']
             val_idx = indices_dict['val']
             test_idx = indices_dict['test']
+            metadata = indices_dict.get("_metadata", {})
+            metadata_backed_split = bool(metadata)
             
-            # Verify consistency with current dataset
-            total_stored = len(train_idx) + len(val_idx) + len(test_idx)
-            if total_stored != len(dataset):
-                raise ValueError(f"Dataset size mismatch (Stored: {total_stored} vs Current: {len(dataset)})")
-                
+            _validate_split_indices(train_idx, val_idx, test_idx, len(dataset))
+            if metadata:
+                if metadata.get("dataset_fingerprint") != dataset_hash:
+                    raise CachedSplitMetadataMismatchError("Dataset fingerprint mismatch")
+                if metadata.get("num_samples") != len(dataset):
+                    raise CachedSplitMetadataMismatchError("Dataset metadata sample count mismatch")
+                if not _split_ratios_match(metadata.get("split_ratios"), split_ratios):
+                    raise CachedSplitMetadataMismatchError("Split ratio metadata mismatch")
+            else:
+                if not allow_legacy_split_upgrade:
+                    raise LegacySplitMetadataError(
+                        "Legacy split file has no _metadata; refusing to trust it without "
+                        "allow_legacy_split_upgrade=True."
+                    )
+                print("⚠️ Legacy split file has no dataset fingerprint; using size/index validation only.")
+                metadata = _split_metadata(len(dataset), split_ratios, dataset_hash)
+                metadata["legacy_upgraded"] = True
+                indices_dict["_metadata"] = metadata
+                with open(save_path, 'w') as f:
+                    json.dump(indices_dict, f)
+                print("💾 Upgraded legacy split file with dataset fingerprint metadata.")
+
             print(f"✅ Loaded: Train={len(train_idx)}, Val={len(val_idx)}, Test={len(test_idx)}")
             return Subset(dataset, train_idx), Subset(dataset, val_idx), Subset(dataset, test_idx)
+        except (CachedSplitMetadataMismatchError, LegacySplitMetadataError):
+            raise
         except Exception as e:
+            if metadata_backed_split:
+                raise RuntimeError(f"Metadata-backed split file is invalid; refusing to regenerate: {e}") from e
             print(f"⚠️ Load failed ({e}), regenerating...")
 
     ratios_str = '/'.join([f"{int(r*100)}" for r in split_ratios])
@@ -67,10 +176,10 @@ def get_stratified_split(dataset, all_ages, split_ratios=(0.80, 0.10, 0.10), sav
     test_indices = []
     
     # Fixed seed for generation
-    random.seed(42)
+    rng = random.Random(42)
     
     for age, indices in indices_by_age.items():
-        random.shuffle(indices)
+        rng.shuffle(indices)
         n = len(indices)
         n_train = int(n * split_ratios[0])
         n_val = int(n * split_ratios[1])
@@ -86,16 +195,18 @@ def get_stratified_split(dataset, all_ages, split_ratios=(0.80, 0.10, 0.10), sav
     print(f"   Test:  {len(test_indices)}")
     
     # Save to JSON
-    save_data = {
-        'train': train_indices,
-        'val': val_indices,
-        'test': test_indices
-    }
-    with open(save_path, 'w') as f:
-        json.dump(save_data, f)
+    _write_split_json(save_path, train_indices, val_indices, test_indices, len(dataset), split_ratios, dataset_hash)
     print(f"💾 Split saved to {save_path}")
     
     return Subset(dataset, train_indices), Subset(dataset, val_indices), Subset(dataset, test_indices)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 # ==========================================
 # 2. AFAD Dataset
@@ -134,23 +245,16 @@ class AFADDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        # 🛡️ Robust Loading with Retry Strategy
-        for attempt in range(3):
-            try:
-                img_path = self.image_paths[idx]
-                age = self.ages[idx]
-                image = Image.open(img_path).convert('RGB')
-                if self.transform:
-                    image = self.transform(image)
-                label_dist = self.dldl_proc.generate_label_distribution(age)
-                return image, label_dist, torch.tensor(age, dtype=torch.float32)
-            except Exception as e:
-                # If failed, pick a random index
-                # print(f"⚠️ Load Fail: {img_path} ({e}), Retrying...") 
-                idx = np.random.randint(len(self.image_paths))
-        
-        # If all retries fail, return None (collate_fn will handle, but risk is minimized)
-        return None
+        try:
+            img_path = self.image_paths[idx]
+            age = self.ages[idx]
+            image = Image.open(img_path).convert('RGB')
+            if self.transform:
+                image = self.transform(image)
+            label_dist = self.dldl_proc.generate_label_distribution(age)
+            return image, label_dist, torch.tensor(age, dtype=torch.float32)
+        except Exception:
+            return None
 
 
 
@@ -391,6 +495,7 @@ def get_dataloaders(config):
 
     full_dataset = ConcatDataset(all_datasets)
     print(f"\n📦 Total Images: {len(full_dataset)}")
+    current_dataset_fingerprint = dataset_fingerprint(full_dataset)
     
     # Stratified Split
     dataset_prefix = "AFAD"
@@ -418,14 +523,32 @@ def get_dataloaders(config):
         target_ratios = (0.80, 0.10, 0.10)
         split_filename = f"dataset_split_{dataset_prefix}_80_10_10.json"
         
+    split_file_tag = optional_sanitize_token(getattr(config, "split_file_tag", None))
+    split_filename = split_filename_with_tag(split_filename, split_file_tag)
+    if split_file_tag:
+        print(f"🏷️ Split File Tag: {split_file_tag}")
     print(f"📄 Using split file: {split_filename} (Mode: {split_protocol})")
     
     train_subset, val_subset, test_subset = get_stratified_split(
         full_dataset, 
         all_ages, 
         split_ratios=target_ratios,
-        save_path=os.path.join(ROOT_DIR, split_filename)
+        save_path=os.path.join(ROOT_DIR, split_filename),
+        dataset_hash=current_dataset_fingerprint,
+        allow_legacy_split_upgrade=getattr(config, "allow_legacy_split_upgrade", False),
     )
+    split_path = os.path.join(ROOT_DIR, split_filename)
+    split_metadata = {}
+    if os.path.exists(split_path):
+        with open(split_path, encoding="utf-8") as f:
+            split_metadata = json.load(f).get("_metadata", {})
+    config.split_metadata = {
+        "split_file": split_filename,
+        "split_file_tag": split_file_tag,
+        "fingerprint": file_sha256(split_path) if os.path.exists(split_path) else None,
+        "dataset_fingerprint": current_dataset_fingerprint,
+        "legacy_upgraded": bool(split_metadata.get("legacy_upgraded", False)),
+    }
 
     # LDS Weights based on TRAIN distribution only (avoid val/test leakage)
     class_weights = None
@@ -442,13 +565,17 @@ def get_dataloaders(config):
     val_set = SubsetWithTransform(val_subset, transform=val_transform)
     test_set = SubsetWithTransform(test_subset, transform=val_transform)
     
-    train_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True, 
-                              num_workers=config.num_workers, pin_memory=True, collate_fn=my_collate_fn, persistent_workers=True)
+    loader_kwargs = {
+        "num_workers": config.num_workers,
+        "pin_memory": config.device.type == "cuda",
+        "collate_fn": my_collate_fn,
+        "persistent_workers": config.num_workers > 0,
+    }
+
+    train_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True, **loader_kwargs)
                               
-    val_loader = DataLoader(val_set, batch_size=config.batch_size, shuffle=False, 
-                            num_workers=config.num_workers, pin_memory=True, collate_fn=my_collate_fn, persistent_workers=True)
+    val_loader = DataLoader(val_set, batch_size=config.batch_size, shuffle=False, **loader_kwargs)
                             
-    test_loader = DataLoader(test_set, batch_size=config.batch_size, shuffle=False, 
-                             num_workers=config.num_workers, pin_memory=True, collate_fn=my_collate_fn, persistent_workers=True)
+    test_loader = DataLoader(test_set, batch_size=config.batch_size, shuffle=False, **loader_kwargs)
                              
     return train_loader, val_loader, test_loader, class_weights

@@ -27,8 +27,15 @@ plt.rcParams.update({
 def load_real_data(seed=None):
     # Determine filenames based on seed
     if seed:
-        file_epoch = f'training_log_seed{seed}.csv'
-        file_batch = f'batch_log_seed{seed}.csv'
+        legacy_epoch = f'training_log_seed{seed}.csv'
+        legacy_batch = f'batch_log_seed{seed}.csv'
+        metadata_logs = glob.glob(f'training_log_*_seed{seed}.csv')
+        if metadata_logs:
+            file_epoch = max(metadata_logs, key=os.path.getmtime)
+            file_batch = file_epoch.replace('training_log_', 'batch_log_', 1)
+        else:
+            file_epoch = legacy_epoch
+            file_batch = legacy_batch
     else:
         # Default mode: Try standard file first
         if os.path.exists('training_log.csv'):
@@ -38,7 +45,7 @@ def load_real_data(seed=None):
         else:
             # Auto-detect latest seed log
             print("⚠️ No seed specified and 'training_log.csv' not found.")
-            logs = glob.glob('training_log_seed*.csv')
+            logs = glob.glob('training_log_*_seed*.csv') + glob.glob('training_log_seed*.csv')
             if not logs:
                 print("❌ No training logs found in current directory.")
                 return None, None
@@ -47,10 +54,13 @@ def load_real_data(seed=None):
             latest_log = max(logs, key=os.path.getmtime)
             # Extract seed from filename "training_log_seedXXXX.csv"
             try:
-                detected_seed = latest_log.replace('training_log_seed', '').replace('.csv', '')
+                detected_seed = latest_log.replace('.csv', '').split('seed')[-1]
                 print(f"🕵️ Auto-detected latest run: Seed {detected_seed}")
                 file_epoch = latest_log
-                file_batch = f'batch_log_seed{detected_seed}.csv'
+                if latest_log.startswith('training_log_'):
+                    file_batch = latest_log.replace('training_log_', 'batch_log_', 1)
+                else:
+                    file_batch = f'batch_log_seed{detected_seed}.csv'
                 seed = detected_seed
             except:
                 print("❌ Failed to parse seed from filename.")
@@ -159,25 +169,29 @@ def plot_thesis_suite(seed=None):
     plt.close()
 
     # ==========================================
-    # 图 4: 泛化差距分析
+    # 图 4: 同口径 KL Loss 差距
     # ==========================================
-    gap = df_epoch['Val_Loss'] - df_epoch['Train_Loss']
-    plt.figure(figsize=(8, 5))
-    ax4 = plt.gca()
-    plt.plot(df_epoch['Epoch'], gap, color='#845EC2', label='Generalization Gap')
-    plt.fill_between(df_epoch['Epoch'], gap, 0, color='#845EC2', alpha=0.15)
-    z = np.polyfit(df_epoch['Epoch'], gap, 1)
-    p = np.poly1d(z)
-    plt.plot(df_epoch['Epoch'], p(df_epoch['Epoch']), "k--", alpha=0.5, linewidth=1, label='Gap Trend')
-    add_best_model_line(ax4, best_epoch)
-    plt.title('Generalization Gap Dynamics')
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss Difference ($Val - Train$)')
-    plt.legend(loc='upper left')
-    plt.grid(True, linestyle='--', alpha=0.5)
-    plt.tight_layout()
-    plt.savefig(f'{current_save_dir}/4_generalization_gap.png')
-    plt.close()
+    if {'Train_KL_Loss', 'Val_KL_Loss'}.issubset(df_epoch.columns):
+        gap = df_epoch['Val_KL_Loss'] - df_epoch['Train_KL_Loss']
+        plt.figure(figsize=(8, 5))
+        ax4 = plt.gca()
+        plt.plot(df_epoch['Epoch'], gap, color='#845EC2', label='KL Gap (Val - Train)')
+        plt.fill_between(df_epoch['Epoch'], gap, 0, color='#845EC2', alpha=0.15)
+        if len(df_epoch) >= 2:
+            z = np.polyfit(df_epoch['Epoch'], gap, 1)
+            p = np.poly1d(z)
+            plt.plot(df_epoch['Epoch'], p(df_epoch['Epoch']), "k--", alpha=0.5, linewidth=1, label='Gap Trend')
+        add_best_model_line(ax4, best_epoch)
+        plt.title('Comparable KL Loss Gap')
+        plt.xlabel('Epoch')
+        plt.ylabel('KL Loss Difference (Val - Train)')
+        plt.legend(loc='upper left')
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.tight_layout()
+        plt.savefig(f'{current_save_dir}/4_kl_loss_gap.png')
+        plt.close()
+    else:
+        print("⚠️ Skipping KL loss gap: Train_KL_Loss/Val_KL_Loss columns are missing in this legacy log.")
 
     # ==========================================
     # 图 5: Batch 稳定性 (趋势图)

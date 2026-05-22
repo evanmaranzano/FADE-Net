@@ -1,7 +1,9 @@
 import os
 import argparse
+import re
+from contextlib import nullcontext
+
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -14,6 +16,14 @@ import csv
 import time
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
+from experiment import (
+    artifact_path,
+    build_training_metadata,
+    checkpoint_metadata_mismatches,
+    load_model_state_package,
+    save_model_package,
+)
+from evaluation import TTA_MODES, evaluate_mae, predict_probs, probs_to_ages
 
 # ==========================================
 # Reproducibility
@@ -44,43 +54,30 @@ def mixup_data(x, y_dist, y_age, alpha=0.4):
     return mixed_x, mixed_y_dist, mixed_y_age
 
 
-# ==========================================
-# Multi-Scale TTA (6x: 0.9/1.0/1.1 + flip)
-# ==========================================
-def multi_scale_tta(images, model):
-    """
-    激进 Multi-Scale TTA: 3个尺度 (0.9, 1.0, 1.1) x 2 (原始 + 翻转) = 6x 平均
-    可将单模型 MAE 降低约 0.01-0.02
-    """
-    scales = [0.9, 1.0, 1.1]
-    all_probs = []
-    
-    for scale in scales:
-        if scale != 1.0:
-            new_size = int(224 * scale)
-            resized = F.interpolate(images, size=new_size, mode='bilinear', align_corners=False)
-            if new_size > 224:
-                start = (new_size - 224) // 2
-                resized = resized[:, :, start:start+224, start:start+224]
-            else:
-                pad = (224 - new_size) // 2
-                resized = F.pad(resized, (pad, 224-new_size-pad, pad, 224-new_size-pad), mode='reflect')
-        else:
-            resized = images
-        
-        # 原始
-        logits = model(resized)
-        probs = F.softmax(logits, dim=1)
-        all_probs.append(probs)
-        
-        # 水平翻转
-        flipped = torch.flip(resized, dims=[3])
-        logits_flip = model(flipped)
-        probs_flip = F.softmax(logits_flip, dim=1)
-        all_probs.append(probs_flip)
-    
-    # 平均 6 个预测
-    return torch.stack(all_probs, dim=0).mean(dim=0)
+def make_amp_context(device_type):
+    if device_type == "cuda":
+        if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+            try:
+                return torch.amp.autocast("cuda")
+            except TypeError:
+                pass
+        return torch.cuda.amp.autocast()
+    return nullcontext()
+
+
+def make_grad_scaler(device_type):
+    enabled = device_type == "cuda"
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        try:
+            return torch.amp.GradScaler("cuda", enabled=enabled)
+        except TypeError:
+            return torch.amp.GradScaler(enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def amp_step_was_skipped(scale_before, scale_after):
+    return scale_after < scale_before
+
 
 # ==========================================
 # CSV Logger
@@ -104,6 +101,82 @@ class CSVLogger:
 # ==========================================
 def save_checkpoint(state, filename="last_checkpoint.pth"):
     torch.save(state, filename)
+
+
+def _format_metadata_mismatches(mismatches):
+    return ", ".join([f"{key}: checkpoint={old!r}, current={new!r}" for key, old, new in mismatches])
+
+
+def _guard_fresh_artifact_overwrite(paths, expected_metadata, device, allow_overwrite=False):
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+
+        detail = "non-checkpoint artifact"
+        if str(path).endswith(".pth"):
+            try:
+                checkpoint = torch.load(path, map_location=device)
+                mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+                detail = (
+                    "checkpoint metadata matches current run"
+                    if not mismatches
+                    else _format_metadata_mismatches(mismatches)
+                )
+            except Exception as exc:
+                detail = f"could not inspect checkpoint metadata: {exc}"
+
+        if allow_overwrite:
+            print(f"⚠️ Overwriting existing artifact by explicit request: {path}")
+            print(f"   {detail}")
+            continue
+        raise RuntimeError(
+            "Existing artifact already exists; refusing to overwrite with a fresh run. "
+            f"Path: {path}. {detail}. "
+            "Use --overwrite_artifacts only after archiving or intentionally replacing the old run."
+        )
+
+
+def _average_loss_sums(loss_sums, batch_count):
+    return {name: value / batch_count for name, value in loss_sums.items()}
+
+
+def _accumulate_loss_components(loss_sums, total_loss, kl_loss, l1_loss, rank_loss, mv_loss):
+    loss_sums["total"] += total_loss
+    loss_sums["kl"] += kl_loss
+    loss_sums["l1"] += l1_loss
+    loss_sums["rank"] += rank_loss
+    loss_sums["mv"] += mv_loss
+
+
+def apply_hard_distillation_mode(cfg, train_loader, val_loader):
+    cfg.use_mixup = False
+    cfg.use_sigma_jitter = False
+
+    train_loader.dataset.augment_label = False
+    train_loader.dataset.transform = val_loader.dataset.transform
+
+    return DataLoader(
+        train_loader.dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+        pin_memory=cfg.device.type == 'cuda',
+        collate_fn=train_loader.collate_fn,
+        persistent_workers=cfg.num_workers > 0,
+    )
+
+
+def parse_selected_test_mae(result_text):
+    patterns = (
+        r"Selected_Test_MAE:\s*([\d.]+)",
+        r"Final Test MAE(?:\s*\([^)]+\))?:\s*([\d.]+)",
+        r"Test MAE:\s*([\d.]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, result_text)
+        if match:
+            return float(match.group(1))
+    return None
 
 # ==========================================
 # 主训练函数
@@ -132,6 +205,34 @@ def train(args):
         cfg.freeze_backbone_epochs = args.freeze
         print(f"🔧 CLI Override: Freeze Epochs -> {cfg.freeze_backbone_epochs}")
 
+    if getattr(args, "backbone_source", None) is not None:
+        cfg.backbone_source = args.backbone_source
+        print(f"🔧 CLI Override: Backbone Source -> {cfg.backbone_source}")
+
+    if getattr(args, "backbone_name", None) is not None:
+        cfg.backbone_name = args.backbone_name
+        print(f"🔧 CLI Override: Backbone Name -> {cfg.backbone_name}")
+
+    if getattr(args, "no_pretrained", False):
+        cfg.backbone_pretrained = False
+        print("🔧 CLI Override: Backbone Pretrained -> False")
+
+    if getattr(args, "afad_dir", None) is not None:
+        cfg.afad_dir = os.path.abspath(args.afad_dir)
+        print(f"🔧 CLI Override: AFAD Dir -> {cfg.afad_dir}")
+
+    if getattr(args, "experiment_tag", None) is not None:
+        cfg.experiment_tag = args.experiment_tag
+        print(f"🔧 CLI Override: Experiment Tag -> {cfg.experiment_tag}")
+
+    if getattr(args, "split_file_tag", None) is not None:
+        cfg.split_file_tag = args.split_file_tag
+        print(f"🔧 CLI Override: Split File Tag -> {cfg.split_file_tag}")
+
+    if getattr(args, "allow_legacy_split_upgrade", False):
+        cfg.allow_legacy_split_upgrade = True
+        print("🔧 CLI Override: Allow legacy split metadata upgrade -> True")
+
     # Ablation switches: map CLI args to config flags
     if getattr(args, 'use_ha', None) is not None:
         cfg.use_hybrid_attention = args.use_ha
@@ -156,6 +257,19 @@ def train(args):
     # 🌱 Easter Egg: Print Seed Meaning
     if seed in cfg.ACADEMIC_SEEDS:
         print(f"✨ Seed {seed}: {cfg.ACADEMIC_SEEDS[seed]}")
+
+    max_train_batches = getattr(args, "max_train_batches", None)
+    max_val_batches = getattr(args, "max_val_batches", None)
+    max_test_batches = getattr(args, "max_test_batches", None)
+    if max_train_batches is not None or max_val_batches is not None or max_test_batches is not None:
+        if not getattr(cfg, "experiment_tag", None):
+            cfg.experiment_tag = "smoke"
+            print("🔧 Auto Experiment Tag -> smoke")
+        print(
+            "🧪 Smoke batch limits: "
+            f"train={max_train_batches}, val={max_val_batches}, test={max_test_batches}. "
+            "Do not report these metrics as paper results."
+        )
 
     dldl_tools = DLDLProcessor(cfg)
     
@@ -207,7 +321,7 @@ def train(args):
     )
     
     # ⚡ AMP Scaler
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = make_grad_scaler(cfg.device.type)
     
     # 6. 调度器
     # Accelerated Decay: Reach min_lr at Epoch 100, then stay low for 20 epochs (Stable Phase)
@@ -216,16 +330,26 @@ def train(args):
     # --- 断点续训逻辑 ---
     start_epoch = 0
     best_mae = float('inf')
-    # Dynamic naming with Seed
-    checkpoint_path = os.path.join(ROOT_DIR, f"last_checkpoint_seed{seed}.pth")
-    # Dynamic naming: best_model_FADE-Net_HA_DLDL_MSFF_SPP_seed{seed}.pth
-    best_model_path = os.path.join(ROOT_DIR, f"best_model_{cfg.project_name}_seed{seed}.pth")
+    training_metadata = build_training_metadata(cfg, seed)
+    checkpoint_path = artifact_path(ROOT_DIR, "last_checkpoint", cfg, seed, ".pth")
+    best_model_path = artifact_path(ROOT_DIR, "best_model", cfg, seed, ".pth")
+    training_log_path = artifact_path(ROOT_DIR, "training_log", cfg, seed, ".csv")
+    batch_log_path = artifact_path(ROOT_DIR, "batch_log", cfg, seed, ".csv")
+    final_result_path = artifact_path(ROOT_DIR, "final_result", cfg, seed, ".txt")
     print(f"🎯 Target Checkpoint Name: {best_model_path}")
+    print(f"🧾 Experiment ID: {training_metadata['experiment_id']}")
     resume_training = False
 
-    if os.path.exists(checkpoint_path):
+    should_resume = bool(getattr(args, "resume", False))
+    if getattr(args, "fresh", False):
+        should_resume = False
+
+    if should_resume and os.path.exists(checkpoint_path):
         print(f"🔄 发现存档 '{checkpoint_path}'，正在恢复...")
         checkpoint = torch.load(checkpoint_path, map_location=cfg.device)
+        mismatches = checkpoint_metadata_mismatches(checkpoint, training_metadata)
+        if mismatches:
+            raise RuntimeError(f"Checkpoint metadata mismatch; refusing to resume. {_format_metadata_mismatches(mismatches)}")
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1 
@@ -241,13 +365,34 @@ def train(args):
         print(f"✅ 恢复成功！从 Epoch {start_epoch+1} 开始。最佳 MAE: {best_mae:.2f}")
         resume_training = True
     else:
-        print("🚀 开始全新训练...")
+        _guard_fresh_artifact_overwrite(
+            (checkpoint_path, best_model_path, training_log_path, batch_log_path, final_result_path),
+            training_metadata,
+            cfg.device,
+            allow_overwrite=bool(getattr(args, "overwrite_artifacts", False)),
+        )
+        if os.path.exists(checkpoint_path):
+            print(f"🆕 Matching checkpoint exists but --resume was not set; starting fresh: {checkpoint_path}")
+        else:
+            print("🚀 开始全新训练...")
 
     # 初始化 Logger (Specific to seed)
-    epoch_logger = CSVLogger(os.path.join(ROOT_DIR, f'training_log_seed{seed}.csv'), 
-                             ['Epoch', 'Train_Loss', 'Train_MAE', 'Val_Loss', 'Val_MAE', 'LR', 'Time', 'Is_Best'], 
-                             resume=resume_training)
-    batch_logger = CSVLogger(os.path.join(ROOT_DIR, f'batch_log_seed{seed}.csv'), ['Epoch', 'Batch', 'Total_Loss', 'KL_Loss', 'L1_Loss', 'Rank_Loss'], resume=resume_training)
+    epoch_logger = CSVLogger(
+        training_log_path,
+        [
+            'Epoch',
+            'Train_Loss', 'Train_KL_Loss', 'Train_L1_Loss', 'Train_Rank_Loss', 'Train_MV_Loss',
+            'Train_MAE',
+            'Val_Loss', 'Val_KL_Loss', 'Val_L1_Loss', 'Val_Rank_Loss', 'Val_MV_Loss',
+            'Val_MAE', 'LR', 'Time', 'Is_Best',
+        ],
+        resume=resume_training,
+    )
+    batch_logger = CSVLogger(
+        batch_log_path,
+        ['Epoch', 'Batch', 'Total_Loss', 'KL_Loss', 'L1_Loss', 'Rank_Loss', 'MV_Loss'],
+        resume=resume_training,
+    )
 
     # 初始化 TensorBoard Writer
     log_dir = os.path.join(ROOT_DIR, "runs", f"{cfg.project_name}_seed{seed}_{int(time.time())}")
@@ -286,6 +431,7 @@ def train(args):
     first_param = next(model.backbone.parameters())
     print(f"🔍 检查 Backbone 状态: {'可训练' if first_param.requires_grad else '已冻结'}")
 
+    hard_distillation_applied = False
     for epoch in range(start_epoch, cfg.epochs):
         # 🌟 Unfreeze check
         if freeze_epochs > 0 and epoch == freeze_epochs:
@@ -300,26 +446,10 @@ def train(args):
         if epoch >= 105:
             # We use a 'Re-Loader' strategy to ensure worker processes (persistent_workers=True)
             # strictly receive the updated config and clean transforms on Windows.
-            if epoch == 105:
+            if not hard_distillation_applied:
                 print(f"🔥 [Epoch {epoch+1}] Hard Distillation Mode: Rebuilding DataLoader to flush persistent workers...")
-                cfg.use_mixup = False
-                cfg.use_sigma_jitter = False
-                
-                # Update Dataset in-place
-                train_loader.dataset.augment_label = False
-                # Switch to pure validation transform (Clean images)
-                train_loader.dataset.transform = val_loader.dataset.transform
-                
-                # Re-instantiate DataLoader
-                train_loader = DataLoader(
-                    train_loader.dataset, 
-                    batch_size=cfg.batch_size, 
-                    shuffle=True, 
-                    num_workers=cfg.num_workers, 
-                    pin_memory=True, 
-                    collate_fn=train_loader.collate_fn, 
-                    persistent_workers=True
-                )
+                train_loader = apply_hard_distillation_mode(cfg, train_loader, val_loader)
+                hard_distillation_applied = True
             
             if cfg.use_sigma_jitter:
                 # Fallback for dynamic safety
@@ -330,10 +460,17 @@ def train(args):
         train_loss = 0.0
         train_mae_sum = 0.0
         train_samples = 0
+        train_batches = 0
+        optimizer_stepped = False
+        train_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0}
         
         print(f"\nEpoch [{epoch+1}/{cfg.epochs}] Training (LR: {optimizer.param_groups[0]['lr']:.1e})...")
         
         for batch_idx, (images, target_dists, true_ages) in enumerate(train_loader):
+            if images.numel() == 0:
+                print(f"⚠️ Skipping empty training batch at index {batch_idx}")
+                continue
+
             images = images.to(cfg.device)
             target_dists = target_dists.to(cfg.device)
             true_ages = true_ages.to(cfg.device)
@@ -347,12 +484,12 @@ def train(args):
             optimizer.zero_grad()
             
             # ⚡ AMP Forward
-            with torch.cuda.amp.autocast():
+            with make_amp_context(cfg.device.type):
                 logits = model(images)
                 log_probs = F.log_softmax(logits, dim=1)
                 
                 # 计算 Combined Loss
-                loss, loss_kl, loss_l1, loss_rank = criterion(log_probs, target_dists, true_ages, logits)
+                loss, loss_kl, loss_l1, loss_rank, loss_mv = criterion(log_probs, target_dists, true_ages, logits)
             
             # ⚡ AMP Backward
             scaler.scale(loss).backward()
@@ -360,15 +497,21 @@ def train(args):
             # Unscale before clipping
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
+
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            step_skipped = amp_step_was_skipped(scale_before, scaler.get_scale())
+            optimizer_stepped = optimizer_stepped or not step_skipped
             
             # 更新 EMA
-            if ema:
+            if ema and not step_skipped:
                 ema.update()
                 
-            train_loss += loss.item()
+            loss_value = loss.item()
+            train_loss += loss_value
+            train_batches += 1
+            _accumulate_loss_components(train_loss_sums, loss_value, loss_kl, loss_l1, loss_rank, loss_mv)
             
             # 计算 MAE (Monitor)
             with torch.no_grad():
@@ -378,20 +521,32 @@ def train(args):
                 train_samples += true_ages.size(0)
             
             if (batch_idx + 1) % 100 == 0:
-                print(f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss.item():.4f} (KL={loss_kl:.3f}, L1={loss_l1:.3f}, Rank={loss_rank:.3f})")
+                print(
+                    f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss_value:.4f} "
+                    f"(KL={loss_kl:.3f}, L1={loss_l1:.3f}, Rank={loss_rank:.3f}, MV={loss_mv:.3f})"
+                )
             
             if batch_idx % 10 == 0:
-                batch_logger.log([epoch + 1, batch_idx, loss.item(), loss_kl, loss_l1, loss_rank])
+                batch_logger.log([epoch + 1, batch_idx, loss_value, loss_kl, loss_l1, loss_rank, loss_mv])
                 
                 # 📈 TensorBoard Logging (Step)
                 global_step = epoch * len(train_loader) + batch_idx
-                writer.add_scalar('Train/Loss_Total', loss.item(), global_step)
+                writer.add_scalar('Train/Loss_Total', loss_value, global_step)
                 writer.add_scalar('Train/Loss_KL', loss_kl, global_step)
                 writer.add_scalar('Train/Loss_L1', loss_l1, global_step)
                 writer.add_scalar('Train/Loss_Rank', loss_rank, global_step)
+                writer.add_scalar('Train/Loss_MV', loss_mv, global_step)
                 writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], global_step)
+
+            if max_train_batches is not None and train_batches >= max_train_batches:
+                print(f"🧪 Reached max_train_batches={max_train_batches}; ending training loop for this epoch.")
+                break
             
-        avg_train_loss = train_loss / len(train_loader)
+        if train_samples == 0:
+            raise RuntimeError("No valid training samples were loaded in this epoch.")
+
+        avg_train_loss = train_loss / train_batches
+        avg_train_components = _average_loss_sums(train_loss_sums, train_batches)
         avg_train_mae = train_mae_sum / train_samples
         
         # --- 2. 验证 (Validation) ---
@@ -402,34 +557,48 @@ def train(args):
             
         model.eval()
         mae_sum = 0.0
-        val_loss_sum = 0.0
+        val_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0}
         total_samples = 0
+        val_batches = 0
         
         with torch.no_grad():
             for images, target_dists, true_ages in val_loader:
+                if images.numel() == 0:
+                    print("⚠️ Skipping empty validation batch")
+                    continue
+
                 images = images.to(cfg.device)
                 target_dists = target_dists.to(cfg.device)
                 true_ages = true_ages.to(cfg.device)
                 
-                # TTA 验证 (Multi-Scale 6x: 0.9/1.0/1.1 + flip)
-                probs = multi_scale_tta(images, model)
+                logits = model(images)
+                log_probs = F.log_softmax(logits, dim=1)
+                val_loss, val_kl, val_l1, val_rank, val_mv = criterion(log_probs, target_dists, true_ages, logits)
+                _accumulate_loss_components(val_loss_sums, val_loss.item(), val_kl, val_l1, val_rank, val_mv)
+                val_batches += 1
                 
-                # 计算 Loss (仅参考，这里只算主KL)
-                log_probs = torch.log(probs + 1e-8) 
-                val_loss = F.kl_div(log_probs, target_dists, reduction='batchmean')
-                val_loss_sum += val_loss.item()
-                
-                pred_ages = dldl_tools.expectation_regression(probs)
+                # Selection metric: multi-scale TTA MAE. Losses above use raw logits
+                # so Train_* and Val_* loss columns remain comparable.
+                probs = predict_probs(model, images, mode="multi", base_size=cfg.img_size)
+                pred_ages = probs_to_ages(probs, cfg.num_classes)
                 mae_sum += torch.sum(torch.abs(pred_ages - true_ages)).item()
                 total_samples += true_ages.size(0)
+
+                if max_val_batches is not None and val_batches >= max_val_batches:
+                    print(f"🧪 Reached max_val_batches={max_val_batches}; ending validation loop.")
+                    break
         
         # 验证结束，如果用了 EMA，恢复原始权重以便继续训练
         if ema:
             ema.restore()
             print("🛡️恢复原始权重继续训练...")
             
+        if total_samples == 0:
+            raise RuntimeError("No valid validation samples were loaded.")
+
         val_mae = mae_sum / total_samples
-        avg_val_loss = val_loss_sum / len(val_loader)
+        avg_val_components = _average_loss_sums(val_loss_sums, val_batches)
+        avg_val_loss = avg_val_components["total"]
         
         print(f"Epoch [{epoch+1}/{cfg.epochs}] | "
               f"T_Loss: {avg_train_loss:.4f} | T_MAE: {avg_train_mae:.2f} | "
@@ -445,24 +614,51 @@ def train(args):
             # 如果用了 EMA，保存 EMA 后的权重为 best_model.pth
             if ema:
                 ema.apply_shadow()
-                torch.save(model.state_dict(), best_model_path)
+                save_model_package(model, best_model_path, training_metadata)
                 ema.restore()
             else:
-                torch.save(model.state_dict(), best_model_path)
+                save_model_package(model, best_model_path, training_metadata)
                 
         # Logging
         current_lr = optimizer.param_groups[0]['lr']
         elapsed = time.time() - start_time
-        epoch_logger.log([epoch + 1, avg_train_loss, avg_train_mae, avg_val_loss, val_mae, current_lr, elapsed, int(is_best)])
+        epoch_logger.log([
+            epoch + 1,
+            avg_train_loss,
+            avg_train_components["kl"],
+            avg_train_components["l1"],
+            avg_train_components["rank"],
+            avg_train_components["mv"],
+            avg_train_mae,
+            avg_val_loss,
+            avg_val_components["kl"],
+            avg_val_components["l1"],
+            avg_val_components["rank"],
+            avg_val_components["mv"],
+            val_mae,
+            current_lr,
+            elapsed,
+            int(is_best),
+        ])
         
         # 📈 TensorBoard Logging (Epoch)
         writer.add_scalar('Epoch/Train_Loss', avg_train_loss, epoch + 1)
+        writer.add_scalar('Epoch/Train_KL_Loss', avg_train_components["kl"], epoch + 1)
+        writer.add_scalar('Epoch/Train_L1_Loss', avg_train_components["l1"], epoch + 1)
+        writer.add_scalar('Epoch/Train_Rank_Loss', avg_train_components["rank"], epoch + 1)
+        writer.add_scalar('Epoch/Train_MV_Loss', avg_train_components["mv"], epoch + 1)
         writer.add_scalar('Epoch/Train_MAE', avg_train_mae, epoch + 1)
         writer.add_scalar('Epoch/Val_Loss', avg_val_loss, epoch + 1)
+        writer.add_scalar('Epoch/Val_KL_Loss', avg_val_components["kl"], epoch + 1)
+        writer.add_scalar('Epoch/Val_L1_Loss', avg_val_components["l1"], epoch + 1)
+        writer.add_scalar('Epoch/Val_Rank_Loss', avg_val_components["rank"], epoch + 1)
+        writer.add_scalar('Epoch/Val_MV_Loss', avg_val_components["mv"], epoch + 1)
         writer.add_scalar('Epoch/Val_MAE', val_mae, epoch + 1)
         
-        if epoch < 100:
+        if epoch < 100 and optimizer_stepped:
             scheduler.step()
+        elif epoch < 100:
+            print("⚠️ Scheduler step skipped because AMP skipped all optimizer steps this epoch.")
         else:
              # Maintain eta_min for Stable Phase (101-120)
              pass
@@ -473,7 +669,8 @@ def train(args):
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(), 
-            'best_mae': best_mae
+            'best_mae': best_mae,
+            'metadata': training_metadata,
         }
         if ema:
             checkpoint_dict['ema_state_dict'] = ema.shadow
@@ -483,7 +680,7 @@ def train(args):
         # --- Manual SWA Strategy ---
         # Save checkpoints for the last 10 epochs
         if epoch >= cfg.epochs - 10:
-            swa_filename = os.path.join(ROOT_DIR, f"checkpoint_seed{seed}_epoch_{epoch+1}.pth")
+            swa_filename = artifact_path(ROOT_DIR, f"checkpoint_epoch_{epoch+1}", cfg, seed, ".pth")
             print(f"💾 Saving SWA Checkpoint: {swa_filename}")
             save_checkpoint(checkpoint_dict, filename=swa_filename)
     
@@ -497,41 +694,34 @@ def train(args):
     
     # Load Best Model
     if os.path.exists(best_model_path):
-        model.load_state_dict(torch.load(best_model_path, map_location=cfg.device))
+        state_dict, checkpoint = load_model_state_package(best_model_path, cfg.device)
+        mismatches = checkpoint_metadata_mismatches(checkpoint, training_metadata)
+        if mismatches:
+            raise RuntimeError(f"Best model metadata mismatch; refusing final evaluation. {_format_metadata_mismatches(mismatches)}")
+        model.load_state_dict(state_dict)
         print(f"📂 Loaded Best Model from {best_model_path}")
     
-    model.eval()
-    test_mae = 0.0
-    count = 0
-    rank_arange = torch.arange(cfg.num_classes).to(cfg.device) # Define rank_arange
-    
-    with torch.no_grad():
-        for images, labels, ages in test_loader:
-            images, labels, ages = images.to(cfg.device), labels.to(cfg.device), ages.to(cfg.device)
-            # TTA Evaluation (Multi-Scale 6x: 0.9/1.0/1.1 + flip)
-            probs = multi_scale_tta(images, model)
-            
-            # Predict
-            output_ages = torch.sum(probs * rank_arange.float(), dim=1)
-            
-            # MAE
-            mae = torch.abs(output_ages - ages).sum().item()
-            test_mae += mae
-            count += images.size(0)
-            
-    final_test_mae = test_mae / count
-    print(f"🏆 Final Test MAE: {final_test_mae:.4f}")
+    test_metrics = evaluate_mae(model, test_loader, cfg, cfg.device, modes=TTA_MODES, max_batches=max_test_batches)
+    selected_tta = training_metadata["selection_metric"]["tta"]
+    final_test_mae = test_metrics[selected_tta]
+    print(f"🏆 Final Test MAE ({selected_tta}): {final_test_mae:.4f}")
+    for mode in TTA_MODES:
+        print(f"   MAE_{mode}: {test_metrics[mode]:.4f}")
     
     # Save Final Result
-    with open(os.path.join(ROOT_DIR, f"final_result_seed{seed}.txt"), "w") as f:
-        f.write(f"Test MAE: {final_test_mae:.4f}\n")
+    with open(final_result_path, "w") as f:
+        f.write(f"MAE_raw: {test_metrics['raw']:.4f}\n")
+        f.write(f"MAE_flip: {test_metrics['flip']:.4f}\n")
+        f.write(f"MAE_multi: {test_metrics['multi']:.4f}\n")
+        f.write(f"Selected_TTA: {selected_tta}\n")
+        f.write(f"Selected_Test_MAE: {final_test_mae:.4f}\n")
+        f.write(f"Experiment ID: {training_metadata['experiment_id']}\n")
         
     writer.close()
 
 if __name__ == "__main__":
     import sys
     import subprocess
-    import re
 
     # Helper function for Batch Mode (Run All)
     def run_training_subprocess(seed):
@@ -552,11 +742,8 @@ if __name__ == "__main__":
                 break
             if output:
                 print(output.strip())
-                if "Final Test MAE:" in output:
-                    try:
-                        mae = float(output.strip().split(":")[-1].strip())
-                    except:
-                        pass
+                if "Final Test MAE" in output:
+                    mae = parse_selected_test_mae(output)
         
         rc = process.poll()
         if rc != 0:
@@ -565,14 +752,17 @@ if __name__ == "__main__":
             
         # Fallback check file
         if mae is None:
-            # Assuming ROOT_DIR is defined and available
-            result_file = os.path.join(ROOT_DIR, f"final_result_seed{seed}.txt")
-            if os.path.exists(result_file):
+            result_candidates = [
+                artifact_path(ROOT_DIR, "final_result", Config(), seed, ".txt"),
+                os.path.join(ROOT_DIR, f"final_result_seed{seed}.txt"),
+            ]
+            for result_file in result_candidates:
+                if not os.path.exists(result_file):
+                    continue
                 with open(result_file, 'r') as f:
-                    content = f.read()
-                    match = re.search(r"Test MAE:\s*([\d\.]+)", content)
-                    if match:
-                        mae = float(match.group(1))
+                    mae = parse_selected_test_mae(f.read())
+                if mae is not None:
+                    break
         return mae
 
     # --- CLI Handling ---
@@ -585,6 +775,19 @@ if __name__ == "__main__":
         parser.add_argument('--split', type=str, choices=['80-10-10', '90-5-5', '72-8-20'], help="Select Split Protocol")
         parser.add_argument('--freeze', type=int, dest='freeze', help='Override backbone freeze epochs')
         parser.add_argument('--freeze_backbone_epochs', type=int, dest='freeze_alias', help='Alias for --freeze')
+        parser.add_argument('--resume', dest='resume', action='store_true', help='Resume only if checkpoint metadata matches')
+        parser.add_argument('--fresh', dest='fresh', action='store_true', help='Ignore existing matching checkpoint')
+        parser.add_argument('--overwrite_artifacts', action='store_true', help='Allow a fresh run to overwrite existing artifacts for the same experiment id')
+        parser.add_argument('--backbone_source', type=str, choices=['torchvision', 'timm'], help='Backbone provider')
+        parser.add_argument('--backbone_name', type=str, help='Backbone model name')
+        parser.add_argument('--no_pretrained', action='store_true', help='Disable pretrained backbone weights')
+        parser.add_argument('--afad_dir', type=str, help='Override AFAD dataset directory')
+        parser.add_argument('--allow_legacy_split_upgrade', action='store_true', help='Trust and stamp a legacy split after size/index validation')
+        parser.add_argument('--max_train_batches', type=int, help='Limit valid train batches for pipeline smoke tests')
+        parser.add_argument('--max_val_batches', type=int, help='Limit valid validation batches for pipeline smoke tests')
+        parser.add_argument('--max_test_batches', type=int, help='Limit valid test batches for pipeline smoke tests')
+        parser.add_argument('--experiment_tag', type=str, help='Append tag to experiment id for smoke or side runs')
+        parser.add_argument('--split_file_tag', type=str, help='Append tag to split filename and experiment id for isolated formal reruns')
 
         # --- Ablation Switches (消融实验开关) ---
         parser.add_argument('--ha', action='store_true', help='Enable Hybrid Attention (CoordAtt)')
@@ -648,9 +851,9 @@ if __name__ == "__main__":
     print("="*60)
     print("🎮 FADE-Net Interactive Training Launcher")
     print("="*60)
-    print("1. [Default]  Run Standard Benchmark (Seed 42, 80-10-10)")
-    print("2. [SOTA]     Run 2026 Academic Seed (Seed 2026, 80-10-10)")
-    print("3. [Batch]    Run All Academic Seeds (42, 3407, 2026, 1337, 1106)")
+    print("1. [Default]  Run Standard Benchmark (Seed 42, 72-8-20)")
+    print("2. [Seed]     Run 2026 Academic Seed (Seed 2026, 72-8-20)")
+    print("3. [Batch]    Run Academic Seeds (42, 3407, 2026)")
     print("4. [Custom]   Configure Manually")
     print("q. [Quit]     Exit")
     print("-" * 60)
@@ -667,21 +870,47 @@ if __name__ == "__main__":
                 batch_size = None
                 split = None
                 freeze = None
+                resume = False
+                fresh = False
+                overwrite_artifacts = False
+                backbone_source = None
+                backbone_name = None
+                no_pretrained = False
+                afad_dir = None
+                allow_legacy_split_upgrade = False
+                max_train_batches = None
+                max_val_batches = None
+                max_test_batches = None
+                experiment_tag = None
+                split_file_tag = None
             train(Args())
             
         elif choice == '2':
-            print("\n🚀 Selected: SOTA 2026 (Seed 2026)")
+            print("\n🚀 Selected: Academic Seed 2026")
             class Args:
                 seed = 2026
                 epochs = None
                 batch_size = None
                 split = None
                 freeze = None
+                resume = False
+                fresh = False
+                overwrite_artifacts = False
+                backbone_source = None
+                backbone_name = None
+                no_pretrained = False
+                afad_dir = None
+                allow_legacy_split_upgrade = False
+                max_train_batches = None
+                max_val_batches = None
+                max_test_batches = None
+                experiment_tag = None
+                split_file_tag = None
             train(Args())
 
         elif choice == '3':
             print("\n🚀 Selected: Run All Academic Seeds")
-            seeds = [42, 3407, 2026, 1337, 1106]
+            seeds = [42, 3407, 2026]
             results = {}
             for s in seeds:
                 mae = run_training_subprocess(s)
@@ -707,24 +936,36 @@ if __name__ == "__main__":
         elif choice == '4':
             print("\n🔧 Custom Configuration Mode:")
             s = input("   - Seed [42]: ").strip() or '42'
-            sp_choice = input("   - Split (1: 80-10-10, 2: 90-5-5, 3: 72-8-20) [1]: ").strip()
+            sp_choice = input("   - Split (1: 72-8-20, 2: 80-10-10, 3: 90-5-5) [1]: ").strip()
             if sp_choice == '2':
-                split = '90-5-5'
+                split = '80-10-10'
             elif sp_choice == '3':
-                split = '72-8-20'
+                split = '90-5-5'
             else:
-                split = '80-10-10'  # Default to Robust 80-10-10
+                split = '72-8-20'
             ep = input("   - Epochs [Default]: ").strip()
             fz = input("   - Freeze Epochs [Default]: ").strip()
             
-            class Args:
-                seed = int(s)
-                split = split
-                epochs = int(ep) if ep else None
-                batch_size = None
-                freeze = int(fz) if fz else None
-            
-            train(Args())
+            train(argparse.Namespace(
+                seed=int(s),
+                split=split,
+                epochs=int(ep) if ep else None,
+                batch_size=None,
+                freeze=int(fz) if fz else None,
+                resume=False,
+                fresh=False,
+                overwrite_artifacts=False,
+                backbone_source=None,
+                backbone_name=None,
+                no_pretrained=False,
+                afad_dir=None,
+                allow_legacy_split_upgrade=False,
+                max_train_batches=None,
+                max_val_batches=None,
+                max_test_batches=None,
+                experiment_tag=None,
+                split_file_tag=None,
+            ))
             
         elif choice == 'q':
             pass

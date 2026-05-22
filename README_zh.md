@@ -2,13 +2,13 @@
 
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.0%2B-EE4C2C.svg?style=flat-square&logo=PyTorch&logoColor=white)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)
-![Performance](https://img.shields.io/badge/Performance-SOTA_Level-success)
+![Protocol](https://img.shields.io/badge/Protocol-AFAD_72--8--20-informational)
 
 [English](README.md) | [中文文档](README_zh.md)
 
 ## 📖 项目概述
 
-**FADE-Net** (前身为 HAL-Net) 是我们轻量级年龄估计系统的**优化迭代版本**。它集成了**多尺度特征融合 (MSFF)**、**空间金字塔池化 (SPP)** 和 **混合注意力机制 (Hybrid Attention)**，旨在实现“端侧设备上的服务器级精度”。
+**FADE-Net** (前身为 HAL-Net) 是我们轻量级年龄估计系统的**优化迭代版本**。它集成了**多尺度特征融合 (MSFF)**、**空间金字塔池化 (SPP)** 和 **混合注意力机制 (Hybrid Attention)**，面向资源受限场景探索较小参数规模下的年龄估计性能。
 
 **命名 "FADE" 的含义：**
 *   **F**eature-fused (特征融合：纹理 + 语义双流)
@@ -16,10 +16,11 @@
 *   **D**istribution (分布学习：自适应 Sigma DLDL-v2)
 *   **E**stimation (估计：鲁棒年龄推理)
 
-**目标性能：**
-*   **MAE**: **3.02** (集成) / **3.057** (最佳单模型) - 在 AFAD 数据集上达到 **轻量级 SOTA** 水平
-*   **参数量**: **4.84M** (比原始 MobileNetV3 更轻)
-*   **速度**: CPU/GPU 上均可实时运行
+**当前内部记录：**
+*   **主协议**: AFAD 分层 `72-8-20`，以最终结果文件中的 `Selected_Test_MAE` 作为主表口径
+*   **历史最佳单模型**: 测试 MAE 约 **3.057**，仅作历史记录；需按当前 split、TTA 和 checkpoint 元数据重新核验后再写入论文主表
+*   **参数量**: 约 **4.84M**
+*   **效率验证**: 已有 CPU/GPU smoke benchmark；正式部署结论仍需在目标设备上补测
 
 ---
 
@@ -73,13 +74,14 @@ pip install -r requirements.txt
 *   **UI/工具**: `streamlit`, `tqdm`, `tensorboard`
 
 ### 2. 训练
-运行完整训练流程 (最佳配置)：
+运行完整训练流程：
 ```bash
-python src/train.py --epochs 120 --freeze_backbone_epochs 5
+python src/train.py --seed 42 --split 72-8-20 --fresh
 ```
-*   **Checkpoints**: 保存于 `Root Directory` (例如 `checkpoint_seed42_epoch_*.pth`)
-*   **CSV日志**: 保存于 `Root Directory` (例如 `training_log_seed42.csv`)
+*   **Checkpoints**: 保存于 `Root Directory`，文件名包含 experiment id
+*   **CSV日志**: 保存于 `Root Directory`，文件名包含 experiment id
 *   **TensorBoard**: 保存于 `runs/FADE-Net_seed42_...` (自动命名)
+*   **覆盖保护**: 同一 experiment id 的日志、checkpoint 和最终结果已存在时，`--fresh` 默认拒绝覆盖；如确需重跑，先归档旧产物、换 `--experiment_tag`，或显式使用 `--overwrite_artifacts`。
 
 ### 3. 评估
 ```bash
@@ -105,39 +107,37 @@ python src/gui_demo.py
 
 ---
 
-## 📊 内部基准测试 (AFAD 数据集, 分层 72-8-20 分割)
+## 📊 内部结果与文献参考 (AFAD 数据集)
 
-| 排名 | 方法 | 骨干网络 | MAE (越低越好 ↓) | 参数量 | 年份 / 来源 |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | **FADE-Net (Ours)** | **MobileNetV3** | **3.057** | **4.84M** | **2025** |
-| 2 | **GRANET** [7] | ResNet-50 | 3.10 | ~25.5M | 2021 / IEEE Access |
-| 3 | **OR-CNN** [2] | VGG-16 | 3.34 | 138M | 2016 / CVPR |
-| 4 | **RAN** [9] | ResNet-34 | 3.42 | ~21.8M | 2017 / CVPR |
-| 5 | **CORAL** [8] | ResNet-34 | 3.48 | ~21.8M | 2020 / PRL |
-| 6 | **DEX** [1] | VGG-16 | 3.80 | 138M | 2015 / ICCV |
+| 方法 | 骨干网络 | MAE (越低越好 ↓) | 参数量 | 协议说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| FADE-Net (Ours) | MobileNetV3 | 约 3.057 | 4.84M | 历史内部记录，需按当前 metadata、split 和 TTA 口径复核 |
+| GRANET [7] | ResNet-50 | 3.10 | ~25.5M | 文献报告结果，协议可能不同 |
+| OR-CNN [2] | VGG-16 | 3.34 | 138M | 文献报告结果，协议可能不同 |
+| RAN [9] | ResNet-34 | 3.42 | ~21.8M | 文献报告结果，协议可能不同 |
+| CORAL [8] | ResNet-34 | 3.48 | ~21.8M | 文献报告结果，协议可能不同 |
+| DEX [1] | VGG-16 | 3.80 | 138M | 文献报告结果，协议可能不同 |
 
-> **亮点**: FADE-Net 在使用 **极少参数量 (4.84M vs 25M+)** 的情况下达到了 **具有竞争力的精度 (3.057 vs 3.10)**。令人惊讶的是，由于我们要优化了特定任务头 (Task-Specific Head) 的设计，它甚至 **比原始的 MobileNetV3-Large (5.48M) 还要轻**。
+> **说明**: 上表中的外部方法来自公开文献，未在当前仓库中按相同 split、预处理、预训练权重和 TTA 协议重新复现，因此只作为量级参考，不构成严格排名或 SOTA 结论。
 >
 > **💡 为什么更轻？**  
-> 我们移除了冗依的 1000 类 ImageNet 分类头 (~2.5M 参数)，并将其替换为 **任务特定的 SPP 头**。虽然 SPP 捕捉了更丰富的空间上下文 (创建了 2816 维特征向量)，但我们优化的投影策略专注于回归特征，成功地相比原始骨干网络减少了 **~0.64M** 的总参数量，同时提高了年龄估计的准确性。
+> 我们移除了冗余的 1000 类 ImageNet 分类头，并将其替换为 **任务特定的 SPP 头**。参数量结论以 `scripts/calc_params.py` 的实际输出为准；精度收益需要在同一协议下通过消融实验验证。
 
-> **注意**: 在 AFAD 数据集上使用标准的分层 72-8-20 分割进行评估。
+> **注意**: 当前主协议为 AFAD 分层 `72-8-20`，正式论文中必须同时报告 split 文件、split fingerprint、TTA 口径和 seed。
 
 ### 📊 与近期 AFAD 专项研究的对比 (2023-2024)
-与过去两年明确在 AFAD 上进行基准测试的论文进行直接对比：
+以下只作为文献结果参考，不能直接写成严格优劣排序：
 
 | 方法 | 年份 | 来源 | MAE | 状态 |
 | :--- | :--- | :--- | :--- | :--- |
-| **FADE-Net (Ours)** | **2025** | **-** | **3.057** | **领先 (轻量级)** |
-| **DCN-R34** [11] | 2023 | *ERA Journal* | ~3.13 | 被 FADE-Net 超越 |
-| **MSDNN** [12] | 2024 | *Electronics* | 3.25 | 被 FADE-Net 超越 |
+| FADE-Net (Ours) | 2025 | - | 约 3.057 | 历史内部记录，待当前协议复核 |
+| **DCN-R34** [11] | 2023 | *ERA Journal* | ~3.13 | 文献报告，协议需核对 |
+| **MSDNN** [12] | 2024 | *Electronics* | 3.25 | 文献报告，协议需核对 |
 | **ResNet-18** [Baseline] | - | *Standard* | ~3.67 | - |
 
-> **📝 关于性能的说明:** 我们报告的 **3.02** MAE 是在留出的测试集 (5%) 上评估的。我们在训练期间也观察到了 **3.01** 的最佳验证集 MAE。
+> **📝 关于性能的说明:** README 主体只使用单模型测试结果作为主口径；集成结果、最佳验证集结果和短训筛选结果应放入补充实验，并明确不参与主表排名。
 
-> **📝 关于分割协议的说明:** 不同的论文使用不同的数据分割。我们使用分层的 **72-8-20 分割** (训练/验证/测试),这是标准的 80-20 实现,从训练部分中显式划出验证集。这提供了 72% 的训练数据、8% 的验证数据和 20% 的测试数据。此协议在学术基准测试中被广泛使用,确保与其他方法的公平比较。
-
-> **注意**: 虽然巨型 Transformer 模型实现了略低的 MAE (~2.6)，但 FADE-Net (3.01) 以 **5% 的计算成本** 提供了 **90% 的性能**。
+> **📝 关于分割协议的说明:** 不同论文可能使用不同的数据清洗、年龄范围、训练/测试划分和测试增强。当前仓库使用分层 **72-8-20 分割** (训练/验证/测试)，这只能保证仓库内部实验公平；外部严格比较需要同协议复现。
 
 ## 📈 可视化与分析 (Seed 1337)
 
@@ -158,22 +158,20 @@ python src/gui_demo.py
 为了确保公平比较和科学潜力，我们坚持严格的学术标准：
 
 1.  **固定数据分割**: 数据集划分 (`train`/`val`/`test`) 使用 `seed=42` 生成一次并锁定。所有后续实验均使用此完全相同的分割以保证公平比较。
-2.  **多种子训练**: 我们通过使用多个随机种子 (如 42, 3407) 运行训练来验证性能稳定性。
+2.  **多种子训练**: 正式论文建议使用 3 个 seed（42, 3407, 2026）报告 mean±std；历史 seed 结果只在能提供日志、checkpoint 和元数据时纳入主表。
     
     | 种子 (Seed) | 测试集 MAE | 状态 | 说明 |
     | :--- | :--- | :--- | :--- |
-    | **1337** | **3.057** | ✅ 已验证 | "Elite Seed" (最佳单模型) |
-    | **42** | **3.095** | ✅ 已验证 | 标准学术基准 |
-    | **2026** | **3.105** | ✅ 已验证 | 2026 学术种子 |
-    | **Mean±Std** | **3.086 ± 0.020** | ✅ 已验证 | 三次实验均值及标准差 |
-    | **Ensemble** | **3.02** | ✅ 已验证 | 概率平均集成 |
+    | **1337** | **3.057** | 历史记录 | 最佳单模型记录，需按当前 metadata 复核后引用 |
+    | **42** | **3.095** | 历史记录 | 可作为重跑基线 |
+    | **2026** | **3.105** | 历史记录 | 可作为重跑基线 |
+    | **Mean±Std** | **3.086 ± 0.020** | 历史记录 | 正式论文需重新核对日志与协议 |
+    | **Ensemble** | **3.02** | 补充结果 | 不作为主表单模型结果 |
 3.  **复现脚本**:
     ```bash
-    # 运行学术基准 (交互式 / 批处理)
-    python src/train.py
-
-    # 直接运行特定种子
-    python src/train.py --seed 1337
+    python src/train.py --seed 42 --split 72-8-20 --fresh
+    python src/train.py --seed 3407 --split 72-8-20 --fresh
+    python src/train.py --seed 2026 --split 72-8-20 --fresh
     ```
 
 ---

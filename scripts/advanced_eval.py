@@ -13,7 +13,6 @@ import os
 import sys
 import argparse
 import torch
-import torch.nn.functional as F
 from tqdm import tqdm
 
 # Add project root to path
@@ -25,133 +24,114 @@ sys.path.insert(0, os.path.join(ROOT_DIR, 'src'))
 from config import Config
 from model import LightweightAgeEstimator
 from dataset import get_dataloaders
-from torchvision import transforms
-from PIL import Image
+from evaluation import TTA_MODES, evaluate_mae, normalize_tta_mode, predict_probs, probs_to_ages
+from experiment import (
+    artifact_path,
+    build_training_metadata,
+    checkpoint_metadata_mismatches,
+    load_model_state_package,
+)
 
 
-def five_crop_tta(images, model, device):
-    """
-    Apply multi-scale TTA: 3 scales (0.9, 1.0, 1.1) x 2 (original + flip) = 6x average.
-    Returns averaged probability distribution.
-    """
-    B, C, H, W = images.shape
-    
-    # Multi-scale: 0.9, 1.0, 1.1
-    scales = [0.9, 1.0, 1.1]
-    all_probs = []
-    
-    for scale in scales:
-        if scale != 1.0:
-            new_size = int(224 * scale)
-            resized = F.interpolate(images, size=new_size, mode='bilinear', align_corners=False)
-            # Center crop back to 224
-            if new_size > 224:
-                start = (new_size - 224) // 2
-                resized = resized[:, :, start:start+224, start:start+224]
-            else:
-                # Pad to 224
-                pad = (224 - new_size) // 2
-                resized = F.pad(resized, (pad, 224-new_size-pad, pad, 224-new_size-pad), mode='reflect')
-        else:
-            resized = images
-        
-        # Original
-        logits = model(resized)
-        probs = F.softmax(logits, dim=1)
-        all_probs.append(probs)
-        
-        # Horizontal Flip
-        flipped = torch.flip(resized, dims=[3])
-        logits_flip = model(flipped)
-        probs_flip = F.softmax(logits_flip, dim=1)
-        all_probs.append(probs_flip)
-    
-    # Average all (6x)
-    avg_probs = torch.stack(all_probs, dim=0).mean(dim=0)
-    return avg_probs
+def apply_common_overrides(cfg, args):
+    if args.split is not None:
+        cfg.split_protocol = args.split
+    if args.backbone_source is not None:
+        cfg.backbone_source = args.backbone_source
+    if args.backbone_name is not None:
+        cfg.backbone_name = args.backbone_name
+    if args.no_pretrained:
+        cfg.backbone_pretrained = False
+    if args.afad_dir is not None:
+        cfg.afad_dir = os.path.abspath(args.afad_dir)
+    if args.experiment_tag is not None:
+        cfg.experiment_tag = args.experiment_tag
+    if getattr(args, "split_file_tag", None) is not None:
+        cfg.split_file_tag = args.split_file_tag
+    if args.allow_legacy_split_upgrade:
+        cfg.allow_legacy_split_upgrade = True
 
 
-def evaluate_with_tta(model, test_loader, config, device, tta_mode='flip'):
-    """
-    Evaluate model with TTA.
-    
-    tta_mode:
-        'none': No TTA
-        'flip': Horizontal flip only (2x)
-        'multi': Multi-scale + flip (6x)
-    """
+def format_metadata_mismatches(mismatches):
+    return ", ".join([f"{key}: checkpoint={old!r}, current={new!r}" for key, old, new in mismatches])
+
+
+def load_checked_model(model_path, cfg, seed, device):
+    model = LightweightAgeEstimator(cfg)
+    state_dict, checkpoint = load_model_state_package(model_path, device)
+    expected_metadata = build_training_metadata(cfg, seed)
+    mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+    if mismatches:
+        raise RuntimeError(f"Checkpoint metadata mismatch; refusing to evaluate. {format_metadata_mismatches(mismatches)}")
+    model.load_state_dict(state_dict)
+    model.to(device)
     model.eval()
-    test_mae = 0.0
-    count = 0
-    rank_arange = torch.arange(config.num_classes, device=device).float()
-    
-    with torch.no_grad():
-        for images, labels, ages in tqdm(test_loader, desc=f"Eval ({tta_mode})"):
-            images = images.to(device)
-            ages = ages.to(device)
-            
-            if tta_mode == 'none':
-                logits = model(images)
-                probs = F.softmax(logits, dim=1)
-            elif tta_mode == 'flip':
-                # Standard: Original + Flip
-                logits = model(images)
-                probs = F.softmax(logits, dim=1)
-                
-                images_flip = torch.flip(images, dims=[3])
-                logits_flip = model(images_flip)
-                probs_flip = F.softmax(logits_flip, dim=1)
-                
-                probs = (probs + probs_flip) / 2.0
-            else:  # 'multi'
-                probs = five_crop_tta(images, model, device)
-            
-            output_ages = torch.sum(probs * rank_arange, dim=1)
-            mae = torch.abs(output_ages - ages).sum().item()
-            test_mae += mae
-            count += images.size(0)
-    
-    return test_mae / count
+    return model
 
 
-def ensemble_predict(models, images, device):
+def selected_modes(tta_arg):
+    if tta_arg == "all":
+        return TTA_MODES
+    return (normalize_tta_mode(tta_arg),)
+
+
+def ensemble_predict(models, images, mode, base_size):
     """
     Ensemble prediction: average probability distributions from multiple models.
     """
-    all_probs = []
-    
-    for model in models:
-        # Original
-        logits = model(images)
-        probs = F.softmax(logits, dim=1)
-        
-        # Flip
-        images_flip = torch.flip(images, dims=[3])
-        logits_flip = model(images_flip)
-        probs_flip = F.softmax(logits_flip, dim=1)
-        
-        avg = (probs + probs_flip) / 2.0
-        all_probs.append(avg)
-    
-    # Average across models
+    all_probs = [predict_probs(model, images, mode=mode, base_size=base_size) for model in models]
     return torch.stack(all_probs, dim=0).mean(dim=0)
+
+
+def evaluate_ensemble(models, test_loader, config, device, modes):
+    mae_sums = {mode: 0.0 for mode in modes}
+    count = 0
+
+    with torch.no_grad():
+        for images, _labels, ages in tqdm(test_loader, desc="Ensemble Eval"):
+            if images.numel() == 0:
+                continue
+
+            images = images.to(device)
+            ages = ages.to(device)
+
+            for mode in modes:
+                probs = ensemble_predict(models, images, mode=mode, base_size=config.img_size)
+                output_ages = probs_to_ages(probs, config.num_classes)
+                mae_sums[mode] += torch.abs(output_ages - ages).sum().item()
+            count += images.size(0)
+
+    if count == 0:
+        raise RuntimeError("No valid evaluation samples were loaded.")
+
+    return {mode: mae_sums[mode] / count for mode in modes}
 
 
 def main():
     parser = argparse.ArgumentParser(description="Advanced Evaluation")
     parser.add_argument('--seed', type=int, default=1337, help='Seed to evaluate (default: 1337)')
-    parser.add_argument('--tta', type=str, default='flip', choices=['none', 'flip', 'multi'], help='TTA mode')
+    parser.add_argument('--tta', type=str, default='all', choices=['all', 'none', 'raw', 'flip', 'multi'], help='TTA mode')
     parser.add_argument('--ensemble', action='store_true', help='Use multi-seed ensemble')
     parser.add_argument('--seeds', type=str, default='42,1337', help='Seeds for ensemble (comma-separated)')
+    parser.add_argument('--split', type=str, choices=['80-10-10', '90-5-5', '72-8-20'], help='Split protocol')
+    parser.add_argument('--backbone_source', type=str, choices=['torchvision', 'timm'], help='Backbone provider')
+    parser.add_argument('--backbone_name', type=str, help='Backbone model name')
+    parser.add_argument('--no_pretrained', action='store_true', help='Disable pretrained backbone weights')
+    parser.add_argument('--afad_dir', type=str, help='Override AFAD dataset directory')
+    parser.add_argument('--experiment_tag', type=str, help='Append tag to experiment id for smoke or side runs')
+    parser.add_argument('--split_file_tag', type=str, help='Use tagged split file/artifact identity')
+    parser.add_argument('--allow_legacy_split_upgrade', action='store_true', help='Trust and stamp a legacy split after size/index validation')
+    parser.add_argument('--model_path', type=str, help='Explicit model checkpoint path')
     args = parser.parse_args()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cfg = Config()
+    apply_common_overrides(cfg, args)
     
     # Load data
     print("📊 Loading test data...")
     _, _, test_loader, _ = get_dataloaders(cfg)
-    rank_arange = torch.arange(cfg.num_classes, device=device).float()
+    modes = selected_modes(args.tta)
     
     if args.ensemble:
         # Multi-seed ensemble
@@ -160,15 +140,12 @@ def main():
         
         models = []
         for seed in seeds:
-            model_path = os.path.join(ROOT_DIR, f'best_model_FADE-Net_HA_DLDL_MSFF_SPP_MV_seed{seed}.pth')
+            model_path = artifact_path(ROOT_DIR, 'best_model', cfg, seed, '.pth')
             if not os.path.exists(model_path):
                 print(f"⚠️ Model not found: {model_path}")
                 continue
             
-            model = LightweightAgeEstimator(cfg)
-            model.load_state_dict(torch.load(model_path, map_location=device))
-            model.to(device)
-            model.eval()
+            model = load_checked_model(model_path, cfg, seed, device)
             models.append(model)
             print(f"✅ Loaded: {os.path.basename(model_path)}")
         
@@ -176,42 +153,27 @@ def main():
             print("❌ Need at least 2 models for ensemble!")
             return
         
-        # Evaluate ensemble
-        test_mae = 0.0
-        count = 0
-        
-        with torch.no_grad():
-            for images, labels, ages in tqdm(test_loader, desc="Ensemble Eval"):
-                images = images.to(device)
-                ages = ages.to(device)
-                
-                probs = ensemble_predict(models, images, device)
-                output_ages = torch.sum(probs * rank_arange, dim=1)
-                mae = torch.abs(output_ages - ages).sum().item()
-                test_mae += mae
-                count += images.size(0)
-        
-        final_mae = test_mae / count
-        print(f"\n🏆 Ensemble Test MAE (Seeds {seeds}): {final_mae:.4f}")
+        metrics = evaluate_ensemble(models, test_loader, cfg, device, modes)
+        print(f"\n🏆 Ensemble Test MAE (Seeds {seeds})")
+        for mode, value in metrics.items():
+            print(f"   MAE_{mode}: {value:.4f}")
         
     else:
         # Single model evaluation with TTA
-        model_path = os.path.join(ROOT_DIR, f'best_model_FADE-Net_HA_DLDL_MSFF_SPP_MV_seed{args.seed}.pth')
+        model_path = args.model_path or artifact_path(ROOT_DIR, 'best_model', cfg, args.seed, '.pth')
         
         if not os.path.exists(model_path):
             print(f"❌ Model not found: {model_path}")
             return
         
-        model = LightweightAgeEstimator(cfg)
-        model.load_state_dict(torch.load(model_path, map_location=device))
-        model.to(device)
+        model = load_checked_model(model_path, cfg, args.seed, device)
         print(f"✅ Loaded: {os.path.basename(model_path)}")
         
-        # Evaluate with different TTA modes
-        print(f"\n📊 Evaluating with TTA mode: {args.tta}")
-        
-        test_mae = evaluate_with_tta(model, test_loader, cfg, device, args.tta)
-        print(f"\n🏆 Test MAE (Seed {args.seed}, TTA={args.tta}): {test_mae:.4f}")
+        print(f"\n📊 Evaluating TTA modes: {', '.join(modes)}")
+        metrics = evaluate_mae(model, test_loader, cfg, device, modes=modes)
+        print(f"\n🏆 Test MAE (Seed {args.seed})")
+        for mode, value in metrics.items():
+            print(f"   MAE_{mode}: {value:.4f}")
 
 
 if __name__ == '__main__':
