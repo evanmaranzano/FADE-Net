@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import os
 import numpy as np
 import seaborn as sns
+import argparse
 import glob
 
 # ================= 配置区域 =================
@@ -24,15 +25,37 @@ plt.rcParams.update({
     'lines.linewidth': 2.5 
 })
 
-def load_real_data(seed=None):
+def infer_batch_log_path(epoch_log):
+    if os.path.basename(epoch_log).startswith('training_log_'):
+        return epoch_log.replace('training_log_', 'batch_log_', 1)
+    return epoch_log.replace('training_log', 'batch_log', 1)
+
+
+def experiment_id_from_log_path(log_path):
+    name = os.path.basename(log_path)
+    if name.startswith('training_log_seed'):
+        return None
+    if name.startswith('training_log_') and name.endswith('.csv'):
+        return name[len('training_log_'):-len('.csv')]
+    return None
+
+
+def load_real_data(seed=None, log_path=None):
+    experiment_id = None
     # Determine filenames based on seed
-    if seed:
+    if log_path:
+        file_epoch = log_path
+        file_batch = infer_batch_log_path(file_epoch)
+        experiment_id = experiment_id_from_log_path(file_epoch)
+        seed = experiment_id or seed or 'Manual'
+    elif seed:
         legacy_epoch = f'training_log_seed{seed}.csv'
         legacy_batch = f'batch_log_seed{seed}.csv'
         metadata_logs = glob.glob(f'training_log_*_seed{seed}.csv')
         if metadata_logs:
             file_epoch = max(metadata_logs, key=os.path.getmtime)
-            file_batch = file_epoch.replace('training_log_', 'batch_log_', 1)
+            file_batch = infer_batch_log_path(file_epoch)
+            experiment_id = experiment_id_from_log_path(file_epoch)
         else:
             file_epoch = legacy_epoch
             file_batch = legacy_batch
@@ -48,7 +71,7 @@ def load_real_data(seed=None):
             logs = glob.glob('training_log_*_seed*.csv') + glob.glob('training_log_seed*.csv')
             if not logs:
                 print("❌ No training logs found in current directory.")
-                return None, None
+                return None, None, None, None
                 
             # Sort by modification time (newest first)
             latest_log = max(logs, key=os.path.getmtime)
@@ -57,26 +80,24 @@ def load_real_data(seed=None):
                 detected_seed = latest_log.replace('.csv', '').split('seed')[-1]
                 print(f"🕵️ Auto-detected latest run: Seed {detected_seed}")
                 file_epoch = latest_log
-                if latest_log.startswith('training_log_'):
-                    file_batch = latest_log.replace('training_log_', 'batch_log_', 1)
-                else:
-                    file_batch = f'batch_log_seed{detected_seed}.csv'
+                file_batch = infer_batch_log_path(latest_log)
+                experiment_id = experiment_id_from_log_path(latest_log)
                 seed = detected_seed
             except:
                 print("❌ Failed to parse seed from filename.")
-                return None, None
+                return None, None, None, None
 
     print(f"🔍 Loading logs: {file_epoch}")
 
     if not (os.path.exists(file_epoch) and os.path.exists(file_batch)):
         print(f"❌ Error: Batch log not found for seed {seed}")
         print(f"   Expected: {file_batch}")
-        return None, None
+        return None, None, None, None
         
     print(f"📂 Reading data...")
     df_epoch = pd.read_csv(file_epoch)
     df_batch = pd.read_csv(file_batch)
-    return df_epoch, df_batch, seed
+    return df_epoch, df_batch, seed, experiment_id
 
 def add_best_model_line(ax_plt, epoch, label_y_pos=None, color='#333333'):
     """辅助函数：添加最佳模型垂直线"""
@@ -88,15 +109,24 @@ def add_best_model_line(ax_plt, epoch, label_y_pos=None, color='#333333'):
     ax_plt.text(epoch, text_pos, ' Best Checkpoint', rotation=90, 
                 verticalalignment='top', fontsize=10, color=color, alpha=0.8)
 
-def plot_thesis_suite(seed=None):
-    df_epoch, df_batch, detected_seed = load_real_data(seed)
+
+def train_mae_column(df_epoch):
+    if 'Train_Mixup_MAE' in df_epoch.columns:
+        return 'Train_Mixup_MAE', 'Train MixUp MAE'
+    return 'Train_MAE', 'Train MAE'
+
+def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
+    df_epoch, df_batch, detected_seed, detected_experiment_id = load_real_data(seed, log_path=log_path)
     if df_epoch is None: return
 
     # Use detected seed if original seed was None
     final_seed = seed if seed else detected_seed
+    final_experiment_id = experiment_id or detected_experiment_id
 
     # Dynamic Save Dir
-    if final_seed and final_seed != 'Legacy':
+    if final_experiment_id:
+        current_save_dir = os.path.join(SAVE_DIR, final_experiment_id)
+    elif final_seed and final_seed != 'Legacy':
         current_save_dir = os.path.join(SAVE_DIR, f"seed_{final_seed}")
     else:
         current_save_dir = SAVE_DIR
@@ -133,7 +163,8 @@ def plot_thesis_suite(seed=None):
     # 图 2: MAE 性能曲线
     # ==========================================
     plt.figure(figsize=(8, 6))
-    plt.plot(df_epoch['Epoch'], df_epoch['Train_MAE'], label='Train MAE', color='#9AC9DB')
+    train_mae_col, train_mae_label = train_mae_column(df_epoch)
+    plt.plot(df_epoch['Epoch'], df_epoch[train_mae_col], label=train_mae_label, color='#9AC9DB')
     plt.plot(df_epoch['Epoch'], df_epoch['Val_MAE'], label='Val MAE', color='#C82423', linestyle='--')
     plt.axvline(x=best_epoch, color='gray', linestyle='--', linewidth=1.5, alpha=0.6)
     plt.scatter(best_epoch, best_mae_val, color='black', s=60, zorder=5)
@@ -299,9 +330,7 @@ def plot_thesis_suite(seed=None):
     print(f"\n🎉 Plots saved to: {current_save_dir}/")
 
 if __name__ == '__main__':
-    import argparse
     import sys
-    import glob
     
     # Interactive Menu if no arguments provided
     if len(sys.argv) == 1:
@@ -310,17 +339,15 @@ if __name__ == '__main__':
         print("="*60)
         
         # Scan for seeds
-        logs = glob.glob('training_log_seed*.csv')
-        found_seeds = []
+        logs = glob.glob('training_log_*_seed*.csv') + glob.glob('training_log_seed*.csv')
+        found_logs = []
         for log in logs:
             try:
-                s = log.replace('training_log_seed', '').replace('.csv', '')
-                found_seeds.append(s)
+                found_logs.append((log, os.path.getmtime(log), experiment_id_from_log_path(log)))
             except:
                 pass
         
-        # Sort seeds: 2026 first, then others numerically
-        found_seeds.sort(key=lambda x: (0 if x == '2026' else 1, x))
+        found_logs.sort(key=lambda item: item[1], reverse=True)
         
         print("🔍 Found the following experiments:")
         menu_map = {}
@@ -329,11 +356,12 @@ if __name__ == '__main__':
         print("   1. [Auto]      Latest Modified Experiment")
         menu_map['1'] = 'AUTO'
         
-        # List found seeds
+        # List found experiment logs
         idx = 2
-        for s in found_seeds:
-            print(f"   {idx}. [Seed {s}]   Run: training_log_seed{s}.csv")
-            menu_map[str(idx)] = s
+        for log, _mtime, exp_id in found_logs:
+            label = exp_id or log
+            print(f"   {idx}. [Run]       {label}")
+            menu_map[str(idx)] = log
             idx += 1
             
         # Legacy Option
@@ -362,9 +390,8 @@ if __name__ == '__main__':
                     # even if legacy training_log.csv exists
                     if logs:
                         latest_log = max(logs, key=os.path.getmtime)
-                        s = latest_log.replace('training_log_seed', '').replace('.csv', '')
-                        print(f"🚀 Auto-Selected Latest: Seed {s}")
-                        sys.argv.extend(['--seed', s])
+                        print(f"🚀 Auto-Selected Latest: {latest_log}")
+                        sys.argv.extend(['--log', latest_log])
                     else:
                         pass # Fallback to load_real_data logic
                 elif selection == 'LEGACY':
@@ -375,7 +402,7 @@ if __name__ == '__main__':
                         print("❌ Legacy log not found.")
                         sys.exit(1)
                 else:
-                    sys.argv.extend(['--seed', selection])
+                    sys.argv.extend(['--log', selection])
             else:
                  print("❌ Invalid choice. Using Auto-Detect.")
                  
@@ -384,10 +411,12 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, help='Specify seed to plot (e.g. 2026)')
+    parser.add_argument('--log', type=str, help='Explicit training log CSV path')
+    parser.add_argument('--experiment_id', type=str, help='Override output directory name under plots/')
     args = parser.parse_args()
     
     # Special handling for Legacy override:
     # If user explicitly wants Legacy but training_log.csv is missing, it will error.
     # If user wants Auto, args.seed is None.
     
-    plot_thesis_suite(seed=args.seed)
+    plot_thesis_suite(seed=args.seed, log_path=args.log, experiment_id=args.experiment_id)

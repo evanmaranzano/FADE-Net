@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -80,6 +81,8 @@ class TextureEnhanceBranch(nn.Module):
 
     def __init__(self, out_dim=64):
         super().__init__()
+        self.register_buffer("imagenet_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        self.register_buffer("imagenet_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.sobel = SobelTextureExtractor()
         self.encoder = nn.Sequential(
             nn.Conv2d(1, 16, 3, stride=2, padding=1, bias=False),
@@ -100,6 +103,7 @@ class TextureEnhanceBranch(nn.Module):
         self.out_dim = out_dim
 
     def forward(self, x_rgb):
+        x_rgb = (x_rgb * self.imagenet_std + self.imagenet_mean).clamp(0.0, 1.0)
         gray = 0.299 * x_rgb[:, 0:1] + 0.587 * x_rgb[:, 1:2] + 0.114 * x_rgb[:, 2:3]
         texture_map = self.sobel(gray)
         feat = self.encoder(texture_map)
@@ -108,27 +112,50 @@ class TextureEnhanceBranch(nn.Module):
 
 
 class FrequencyDomainAttention(nn.Module):
-    """Lightweight frequency-domain channel attention using multi-scale pooling
-    to approximate DCT frequency bands. Inspired by FcaNet (CVPR 2021)."""
+    """Lightweight channel attention from fixed low-frequency DCT descriptors."""
 
-    def __init__(self, channels, reduction=16):
+    def __init__(self, channels, reduction=16, pool_size=7):
         super().__init__()
+        self.pool_size = pool_size
+        self.num_frequencies = 3
         mid = max(8, channels // reduction)
-        self.compress = nn.Linear(channels, mid, bias=False)
-        self.bn = nn.BatchNorm1d(mid)
+        self.compress = nn.Linear(channels * self.num_frequencies, mid, bias=False)
+        self.norm = nn.LayerNorm(mid)
         self.act = nn.Hardswish()
         self.expand = nn.Linear(mid, channels, bias=False)
         self.sigmoid = nn.Sigmoid()
+        self.register_buffer("dct_basis", self._build_dct_basis(pool_size), persistent=False)
+
+    @staticmethod
+    def _dct_2d_basis(pool_size, u, v):
+        coords = torch.arange(pool_size, dtype=torch.float32)
+        x = coords.view(pool_size, 1)
+        y = coords.view(1, pool_size)
+        alpha_u = math.sqrt(1.0 / pool_size) if u == 0 else math.sqrt(2.0 / pool_size)
+        alpha_v = math.sqrt(1.0 / pool_size) if v == 0 else math.sqrt(2.0 / pool_size)
+        basis_x = torch.cos(math.pi * (2 * x + 1) * u / (2 * pool_size))
+        basis_y = torch.cos(math.pi * (2 * y + 1) * v / (2 * pool_size))
+        return alpha_u * alpha_v * basis_x * basis_y
+
+    @classmethod
+    def _build_dct_basis(cls, pool_size):
+        # DC plus two first-order directional frequencies keep the module cheap.
+        frequencies = [(0, 0), (0, 1), (1, 0)]
+        return torch.stack([cls._dct_2d_basis(pool_size, u, v) for u, v in frequencies])
 
     def forward(self, x):
         if x.dim() == 4:
             b, c, h, w = x.shape
-            x_flat = F.adaptive_avg_pool2d(x, 1).flatten(1)
+            pooled = F.adaptive_avg_pool2d(x, (self.pool_size, self.pool_size))
+            basis = self.dct_basis.to(device=x.device, dtype=x.dtype)
+            descriptor = (pooled.unsqueeze(1) * basis.view(1, self.num_frequencies, 1, self.pool_size, self.pool_size)).sum(dim=(-1, -2))
+            x_flat = descriptor.transpose(1, 2).reshape(b, c * self.num_frequencies)
         else:
             b, c = x.shape
-            x_flat = x
+            zeros = torch.zeros_like(x)
+            x_flat = torch.cat([x, zeros, zeros], dim=1)
         attn = self.compress(x_flat)
-        attn = self.bn(attn)
+        attn = self.norm(attn)
         attn = self.act(attn)
         attn = self.expand(attn)
         attn = self.sigmoid(attn)
@@ -167,6 +194,13 @@ class AgeMoEHead(nn.Module):
         expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)  # (B, num_experts, num_classes)
         out = (gate_weights.unsqueeze(-1) * expert_outputs).sum(dim=1)  # (B, num_classes)
         return out
+
+    def forward_with_gate(self, x):
+        gate_logits = self.gate(x)
+        gate_weights = F.softmax(gate_logits, dim=1)
+        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)
+        out = (gate_weights.unsqueeze(-1) * expert_outputs).sum(dim=1)
+        return out, gate_logits
 
 
 class LightweightAgeEstimator(nn.Module):
@@ -262,8 +296,8 @@ class LightweightAgeEstimator(nn.Module):
         self.use_freq_attention = bool(getattr(config, "use_freq_attention", False))
         if self.use_freq_attention:
             print("[Model] Frequency-Domain Attention: ENABLED")
-            spp_out_channels = self.spp_channels if self.use_spp else semantic_dim
-            self.freq_attention = FrequencyDomainAttention(spp_out_channels, reduction=16)
+            freq_channels = self.spp_channels if self.use_spp else self.last_channel
+            self.freq_attention = FrequencyDomainAttention(freq_channels, reduction=16)
         else:
             print("[Model] Frequency-Domain Attention: DISABLED")
 
@@ -300,18 +334,22 @@ class LightweightAgeEstimator(nn.Module):
         fused = weights[0] * f_shallow + weights[1] * f_mid
         return self.fusion_out(fused)
 
-    def forward(self, x):
+    def extract_features(self, x):
         capture_indices = self.msff_indices if self.use_multi_scale else ()
         deep_feature, captured = self.backbone.forward_features(x, capture_indices=capture_indices)
 
         if self.use_spp:
-            semantic = self.spp_module(deep_feature)
-            semantic = F.adaptive_avg_pool2d(semantic, (1, 1)).flatten(1)
+            semantic_map = self.spp_module(deep_feature)
         else:
-            semantic = self.semantic_projector(self.backbone.pool_features(deep_feature))
+            semantic_map = deep_feature
 
         if self.use_freq_attention:
-            semantic = self.freq_attention(semantic)
+            semantic_map = self.freq_attention(semantic_map)
+
+        if self.use_spp:
+            semantic = F.adaptive_avg_pool2d(semantic_map, (1, 1)).flatten(1)
+        else:
+            semantic = self.semantic_projector(self.backbone.pool_features(semantic_map))
 
         if self.use_multi_scale:
             texture = self._fuse_multi_scale(captured)
@@ -321,4 +359,16 @@ class LightweightAgeEstimator(nn.Module):
             texture_feat = self.texture_branch(x)
             semantic = torch.cat([semantic, texture_feat], dim=1)
 
-        return self.final_head(semantic)
+        return semantic
+
+    def forward(self, x, return_features=False):
+        features = self.extract_features(x)
+        extras = {}
+        if self.use_moe and hasattr(self.final_head, "forward_with_gate"):
+            logits, gate_logits = self.final_head.forward_with_gate(features)
+            extras["moe_gate_logits"] = gate_logits
+        else:
+            logits = self.final_head(features)
+        if return_features:
+            return logits, features, extras
+        return logits

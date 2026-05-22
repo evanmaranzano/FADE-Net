@@ -38,6 +38,7 @@ class BackboneScreeningRunnerTests(unittest.TestCase):
             overwrite_artifacts=False,
             allow_legacy_split_upgrade=False,
             split_file_tag=None,
+            ablation_id=None,
             log_dir="F:/FADE-Net/docs/backbone_screening_logs",
         )
 
@@ -112,6 +113,20 @@ class BackboneScreeningRunnerTests(unittest.TestCase):
         self.assertIn("--split_file_tag", command)
         self.assertIn("formal_v1", command)
 
+    def test_build_command_passes_ablation_profile_flags(self):
+        args = self.make_args()
+        args.ablation_id = "A7"
+
+        command = build_command(args, "timm", "mobilenetv4_conv_small")
+
+        self.assertIn("--msff", command)
+        self.assertIn("--spp", command)
+        self.assertIn("--triplet", command)
+        self.assertIn("--no-texture", command)
+        self.assertIn("--no-freq", command)
+        self.assertIn("--no-moe", command)
+        self.assertIn("--no-asym", command)
+
     def test_build_command_keeps_default_torchvision_backbone_implicit(self):
         command = build_command(self.make_args(), "torchvision", "mobilenet_v3_large")
 
@@ -136,6 +151,17 @@ class BackboneScreeningRunnerTests(unittest.TestCase):
         cfg = config_for_candidate(args, "timm", "repvit_m0_9")
 
         self.assertEqual("formal_v1", cfg.split_file_tag)
+
+    def test_config_for_candidate_applies_ablation_profile(self):
+        args = self.make_args()
+        args.ablation_id = "A7"
+
+        cfg = config_for_candidate(args, "timm", "mobilenetv4_conv_small")
+
+        self.assertTrue(cfg.use_multi_scale)
+        self.assertTrue(cfg.use_spp)
+        self.assertTrue(cfg.use_adaptive_triplet)
+        self.assertFalse(cfg.use_texture_branch)
 
     def test_select_candidates_filters_by_backbone_name(self):
         self.assertTrue(hasattr(run_backbone_screening, "select_candidates"))
@@ -263,6 +289,16 @@ class BackboneScreeningRunnerTests(unittest.TestCase):
             stderr_log,
         )
 
+    def test_log_paths_include_ablation_id(self):
+        args = self.make_args()
+        args.log_dir = "F:/logs"
+        args.ablation_id = "A9"
+
+        stdout_log, stderr_log = log_paths_for_candidate(args, "timm", "mobilenetv4_conv_small")
+
+        self.assertEqual(Path("F:/logs/timm_mobilenetv4_conv_small_pretrained_72-8-20_A9_seed42.out.log"), stdout_log)
+        self.assertEqual(Path("F:/logs/timm_mobilenetv4_conv_small_pretrained_72-8-20_A9_seed42.err.log"), stderr_log)
+
     def test_main_flushes_manifest_after_each_candidate(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             output = Path(tmpdir) / "screen.csv"
@@ -385,6 +421,30 @@ class BackboneScreeningRunnerTests(unittest.TestCase):
             self.assertEqual("formal_v1", row["split_file_tag"])
             self.assertIn("--split_file_tag formal_v1", row["command"])
             self.assertIn("splitfile-formal_v1", row["result_path"])
+
+    def test_main_manifest_records_ablation_id_and_flags(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "screen.csv"
+            argv = [
+                "run_backbone_screening.py",
+                "--output",
+                str(output),
+                "--candidates",
+                "mobilenetv4_conv_small",
+                "--ablation_id",
+                "A7",
+            ]
+            with mock.patch.object(run_backbone_screening.sys, "argv", argv):
+                run_backbone_screening.main()
+
+            with output.open(encoding="utf-8", newline="") as f:
+                row = next(csv.DictReader(f))
+
+            self.assertEqual("A7", row["ablation_id"])
+            self.assertEqual("True", row["use_adaptive_triplet"])
+            self.assertEqual("False", row["use_texture_branch"])
+            self.assertIn("--triplet", row["command"])
+            self.assertIn("TRIPLET", row["result_path"])
 
     def test_main_refuses_existing_candidate_artifacts_without_explicit_overwrite(self):
         with tempfile.TemporaryDirectory() as tmpdir:

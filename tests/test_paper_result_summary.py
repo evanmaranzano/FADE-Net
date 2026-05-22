@@ -16,6 +16,7 @@ class PaperResultSummaryTests(unittest.TestCase):
     def write_audit(self, path):
         rows = [
             {
+                "ablation_id": "A3",
                 "source": "timm",
                 "backbone": "mobilenetv4_conv_small",
                 "seed": "42",
@@ -26,6 +27,18 @@ class PaperResultSummaryTests(unittest.TestCase):
                 "mae_multi": "3.6130",
             },
             {
+                "ablation_id": "A7",
+                "source": "timm",
+                "backbone": "mobilenetv4_conv_small",
+                "seed": "42",
+                "status": "paper-ready",
+                "selected_test_mae": "3.5000",
+                "mae_raw": "3.5000",
+                "mae_flip": "3.4900",
+                "mae_multi": "3.5000",
+            },
+            {
+                "ablation_id": "",
                 "source": "torchvision",
                 "backbone": "mobilenet_v3_large",
                 "seed": "42",
@@ -48,22 +61,25 @@ class PaperResultSummaryTests(unittest.TestCase):
 
             summary = build_summary(
                 [audit],
-                candidates=["torchvision/mobilenet_v3_large", "timm/mobilenetv4_conv_small"],
+                candidates=["torchvision/mobilenet_v3_large", "A3:timm/mobilenetv4_conv_small", "A7:timm/mobilenetv4_conv_small"],
                 seeds=[42, 3407, 2026],
             )
 
         by_name = {row["candidate"]: row for row in summary}
-        self.assertEqual("partial", by_name["timm/mobilenetv4_conv_small"]["status"])
-        self.assertEqual("42", by_name["timm/mobilenetv4_conv_small"]["ready_seeds"])
-        self.assertEqual("3407,2026", by_name["timm/mobilenetv4_conv_small"]["missing_seeds"])
-        self.assertEqual("3.6130", by_name["timm/mobilenetv4_conv_small"]["mean_selected_test_mae"])
-        self.assertEqual("", by_name["timm/mobilenetv4_conv_small"]["std_selected_test_mae"])
+        self.assertEqual("partial", by_name["A3:timm/mobilenetv4_conv_small"]["status"])
+        self.assertEqual("42", by_name["A3:timm/mobilenetv4_conv_small"]["ready_seeds"])
+        self.assertEqual("3407,2026", by_name["A3:timm/mobilenetv4_conv_small"]["missing_seeds"])
+        self.assertEqual("3.6130", by_name["A3:timm/mobilenetv4_conv_small"]["mean_selected_test_mae"])
+        self.assertEqual("", by_name["A3:timm/mobilenetv4_conv_small"]["std_selected_test_mae"])
+        self.assertEqual("3.5000", by_name["A7:timm/mobilenetv4_conv_small"]["mean_selected_test_mae"])
         self.assertEqual("missing", by_name["torchvision/mobilenet_v3_large"]["status"])
 
     def test_markdown_warns_partial_rows_are_not_final(self):
         rows = [
             {
+                "ablation_id": "A3",
                 "candidate": "timm/mobilenetv4_conv_small",
+                "candidate_name": "timm/mobilenetv4_conv_small",
                 "status": "partial",
                 "ready_seeds": "42",
                 "missing_seeds": "3407,2026",

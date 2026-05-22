@@ -32,6 +32,20 @@ def test_moe_in_model():
     assert out.shape == (2, cfg.num_classes)
 
 
+def test_moe_model_returns_gate_logits_for_loss():
+    """MoE model exposes gate logits when training asks for features."""
+    cfg = Config()
+    cfg.use_moe = True
+    cfg.use_spp = True
+    cfg.img_size = 224
+    model = LightweightAgeEstimator(cfg)
+    x = torch.randn(2, 3, 224, 224)
+    logits, features, extras = model(x, return_features=True)
+    assert logits.shape == (2, cfg.num_classes)
+    assert features.shape[0] == 2
+    assert extras["moe_gate_logits"].shape == (2, cfg.moe_num_experts)
+
+
 def test_moe_disabled():
     """Model without MoE should use standard head."""
     cfg = Config()

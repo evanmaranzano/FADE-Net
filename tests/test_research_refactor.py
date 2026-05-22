@@ -35,9 +35,14 @@ class ResearchRefactorTests(unittest.TestCase):
             logits = model(torch.zeros(1, 3, cfg.img_size, cfg.img_size))
 
         self.assertEqual((1, cfg.num_classes), tuple(logits.shape))
-        self.assertEqual(40, model.feature_spec.shallow_channels)
-        self.assertEqual(112, model.feature_spec.mid_channels)
-        self.assertEqual(960, model.feature_spec.out_channels)
+        self.assertGreater(model.feature_spec.shallow_channels, 0)
+        self.assertGreater(model.feature_spec.mid_channels, 0)
+        self.assertGreater(model.feature_spec.out_channels, 0)
+        self.assertEqual(tuple(cfg.effective_msff_feature_indices), tuple(model.msff_indices))
+        self.assertEqual(
+            (model.feature_spec.shallow_channels, model.feature_spec.mid_channels),
+            tuple(cfg.effective_msff_channels),
+        )
 
     def test_training_metadata_distinguishes_backbones(self):
         cfg_a = self.make_fast_config()
@@ -54,8 +59,8 @@ class ResearchRefactorTests(unittest.TestCase):
     def test_checkpoint_metadata_rejects_mismatched_backbone(self):
         cfg_current = self.make_fast_config()
         cfg_checkpoint = self.make_fast_config()
-        cfg_checkpoint.backbone_source = "timm"
-        cfg_checkpoint.backbone_name = "mobilenetv4_conv_small"
+        cfg_checkpoint.backbone_source = "torchvision"
+        cfg_checkpoint.backbone_name = "mobilenet_v3_large"
 
         expected = build_training_metadata(cfg_current, seed=42)
         checkpoint = {"metadata": build_training_metadata(cfg_checkpoint, seed=42)}

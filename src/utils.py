@@ -6,6 +6,7 @@ import numpy as np
 import copy
 import random
 import os
+from contextlib import nullcontext
 
 # ==========================================
 # 0. Reproducibility Tool
@@ -144,6 +145,17 @@ class EMAModel:
 # ==========================================
 # 4. 高级损失函数 (Ranking Loss)
 # ==========================================
+def disabled_autocast(device_type):
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        try:
+            return torch.amp.autocast(device_type=device_type, enabled=False)
+        except TypeError:
+            pass
+    if device_type == "cuda":
+        return torch.cuda.amp.autocast(enabled=False)
+    return nullcontext()
+
+
 class OrderRegressionLoss(nn.Module):
     """
     排序损失 (Ordinal Regression / Ranking Loss)
@@ -256,7 +268,7 @@ class OrderRegressionLoss(nn.Module):
         cdf_pred = torch.clamp(cdf_pred, min=1e-7, max=1-1e-7)
         
         # ⚡ AMP Safety: BCE is unstable in FP16, execute in FP32
-        with torch.cuda.amp.autocast(enabled=False):
+        with disabled_autocast(logits.device.type):
             loss_emd = F.binary_cross_entropy(cdf_pred.float(), cdf_target.float(), reduction='mean')
         return loss_emd
 
@@ -345,7 +357,7 @@ class AdaptiveTripletLoss(nn.Module):
         m = self.base_margin * (1.0 + self.alpha * age_diff.unsqueeze(1))  # (B, 1, B)
         violation = F.relu(d_pos - d_neg + m)  # (B, B, B)
         # Mask: valid triple = (i,j) positive AND (i,k) negative
-        valid = mask_pos.unsqueeze(2) * mask_neg.unsqueeze(0)  # (B, B, B)
+        valid = mask_pos.unsqueeze(2) * mask_neg.unsqueeze(1)  # (B, B, B)
         violation = violation * valid
         total = violation.sum()
         count = valid.sum().clamp(min=1)
@@ -425,15 +437,36 @@ class CombinedLoss(nn.Module):
                 delta=getattr(config, 'asym_delta', 1.0),
             )
 
-    def forward(self, log_probs, target_dists, true_ages, logits):
+        self.use_moe = getattr(config, 'use_moe', False)
+        self.lambda_moe_gate = getattr(config, 'lambda_moe_gate', 0.02)
+        self.num_moe_experts = getattr(config, 'moe_num_experts', 3)
+        self.min_age = getattr(config, 'min_age', 0)
+        self.max_age = getattr(config, 'max_age', 80)
+        self.num_classes = getattr(config, 'num_classes', self.max_age - self.min_age + 1)
+
+    @staticmethod
+    def _scalar(value, device):
+        if isinstance(value, torch.Tensor):
+            return value
+        return torch.tensor(float(value), device=device)
+
+    def _moe_gate_targets(self, target_dists, device):
+        class_ids = torch.arange(self.num_classes, device=device)
+        bin_ids = torch.div(class_ids * self.num_moe_experts, self.num_classes, rounding_mode='floor')
+        bin_ids = bin_ids.clamp(0, self.num_moe_experts - 1)
+        gate_targets = torch.zeros(target_dists.shape[0], self.num_moe_experts, device=device, dtype=target_dists.dtype)
+        gate_targets.scatter_add_(1, bin_ids.unsqueeze(0).expand(target_dists.shape[0], -1), target_dists.to(device))
+        return gate_targets.clamp_min(1e-8)
+
+    def forward(self, log_probs, target_dists, true_ages, logits, embeddings=None, extras=None):
         # 1. KL 散度 (Main Loss)
         kl = self.kl_loss(log_probs, target_dists)
         
         # 2. Re-weighting (LDS)
         if self.weights is not None:
+            weights = self.weights.to(log_probs.device)
             element_kl = F.kl_div(log_probs, target_dists, reduction='none').sum(dim=1)
-            age_indices = true_ages.long().clamp(0, len(self.weights)-1)
-            batch_weights = self.weights[age_indices]
+            batch_weights = torch.matmul(target_dists.to(log_probs.device), weights)
             w_kl = (element_kl * batch_weights).mean()
         else:
             w_kl = kl
@@ -449,10 +482,13 @@ class CombinedLoss(nn.Module):
         else:
              l1 = F.l1_loss(pred_age, true_ages)
 
-        # M3: Asymmetric Ordinal Loss (replaces L1 when enabled)
+        # M3: Asymmetric Ordinal Loss (kept separate from the standard L1 term).
+        loss_asym = torch.tensor(0.0).to(log_probs.device)
         if self.use_asymmetric_ordinal:
-            asym_loss = self.asym_loss_fn(pred_age, true_ages)
-            l1 = self.lambda_asym * asym_loss
+            loss_asym = self.asym_loss_fn(pred_age, true_ages)
+            term_asym = self.lambda_asym * loss_asym
+        else:
+            term_asym = 0.0
 
         # 4. Rank Loss (CDF Loss / EMD)
         # 注意: OrderRegressionLoss 内部实现了 CDF MSE
@@ -477,11 +513,31 @@ class CombinedLoss(nn.Module):
         # M2: Adaptive Triplet Loss
         loss_triplet = torch.tensor(0.0).to(log_probs.device)
         if self.use_adaptive_triplet:
-            loss_triplet = self.triplet_loss_fn(logits, true_ages)
+            triplet_embeddings = embeddings if embeddings is not None else logits
+            loss_triplet = self.triplet_loss_fn(triplet_embeddings, true_ages)
             term_triplet = self.lambda_triplet * loss_triplet
         else:
             term_triplet = 0.0
 
+        # M5: age-bin supervision keeps MoE routing tied to age ranges.
+        loss_moe_gate = torch.tensor(0.0).to(log_probs.device)
+        if self.use_moe and extras and extras.get("moe_gate_logits") is not None:
+            gate_targets = self._moe_gate_targets(target_dists, log_probs.device)
+            gate_log_probs = F.log_softmax(extras["moe_gate_logits"], dim=1)
+            loss_moe_gate = F.kl_div(gate_log_probs, gate_targets, reduction='batchmean')
+            term_moe_gate = self.lambda_moe_gate * loss_moe_gate
+        else:
+            term_moe_gate = 0.0
+
         # 总损失
-        total_loss = w_kl + self.lambda_l1 * l1 + term_rank + term_mv + term_triplet
-        return total_loss, w_kl.item(), l1.item(), rank_loss.item(), loss_mv.item(), loss_triplet.item()
+        total_loss = w_kl + self.lambda_l1 * l1 + term_rank + term_mv + term_triplet + term_asym + term_moe_gate
+        return (
+            total_loss,
+            w_kl.detach().item(),
+            l1.detach().item(),
+            rank_loss.detach().item(),
+            loss_mv.detach().item(),
+            loss_triplet.detach().item(),
+            loss_asym.detach().item(),
+            loss_moe_gate.detach().item(),
+        )

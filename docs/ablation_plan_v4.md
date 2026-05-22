@@ -3,7 +3,7 @@
 ## 背景
 
 主 backbone 已切换为 `timm/mobilenetv4_conv_small`（2024 架构，内置高效注意力）。
-HA（CoordAtt 注入）不适用于 timm backbone（无 SE 块可替换），消融聚焦于 MSFF、SPP、DLDL、MV Loss 四个模块。
+HA（CoordAtt 注入）不适用于 timm backbone（无 SE 块可替换）。V4-small 方案聚焦 MSFF、SPP、TEX、FREQ、MOE、TRIPLET、ASYM 等可实际落盘和审计的模块。
 
 ## 协议
 
@@ -16,18 +16,18 @@ HA（CoordAtt 注入）不适用于 timm backbone（无 SE 块可替换），消
 
 ## 消融配置
 
-| 编号 | 配置名 | DLDL | MV | MSFF | SPP | 说明 |
-|------|--------|------|----|------|-----|------|
-| A0 | Baseline | Y | Y | - | - | V4-small + FC head + DLDL + MV |
-| A1 | +MSFF | Y | Y | Y | - | 加多尺度特征融合 |
-| A2 | +SPP | Y | Y | - | Y | 加空间金字塔池化 |
-| A3 | Full | Y | Y | Y | Y | 完整模型 |
-| A4 | +TEX | Y | Y | Y | Y | 加高频纹理增强分支 |
-| A5 | +FREQ | Y | Y | Y | Y | 加频域注意力 |
-| A6 | +MOE | Y | Y | Y | Y | 替换为 MoE Head |
-| A7 | +TRIPLET | Y | Y | Y | Y | 加自适应三元组损失 |
-| A8 | +ASYM | Y | Y | Y | Y | 加非对称序数损失 |
-| A9 | Full+ | Y | Y | Y | Y | 全部启用 |
+| 编号 | 配置名 | DLDL | MV | MSFF | SPP | TEX | FREQ | MOE | TRIPLET | ASYM | 额外 flags |
+|------|--------|------|----|------|-----|-----|------|-----|---------|------|------------|
+| A0 | Baseline | Y | Y | - | - | - | - | - | - | - | `--no-msff --no-spp` |
+| A1 | +MSFF | Y | Y | Y | - | - | - | - | - | - | `--no-spp` |
+| A2 | +SPP | Y | Y | - | Y | - | - | - | - | - | `--no-msff` |
+| A3 | Full | Y | Y | Y | Y | - | - | - | - | - | none |
+| A4 | +TEX | Y | Y | Y | Y | Y | - | - | - | - | `--texture` |
+| A5 | +FREQ | Y | Y | Y | Y | - | Y | - | - | - | `--freq` |
+| A6 | +MOE | Y | Y | Y | Y | - | - | Y | - | - | `--moe` |
+| A7 | +TRIPLET | Y | Y | Y | Y | - | - | - | Y | - | `--triplet` |
+| A8 | +ASYM | Y | Y | Y | Y | - | - | - | - | Y | `--asym` |
+| A9 | Full+ | Y | Y | Y | Y | Y | Y | Y | Y | Y | `--texture --freq --moe --triplet --asym` |
 
 > **为什么 Baseline 保留 DLDL + MV**：这两项是年龄估计任务的核心 loss 设计（标签分布学习 + 均值方差约束），不是结构模块。消融目的是验证结构模块（MSFF、SPP）的增量贡献。
 
@@ -172,24 +172,40 @@ EPOCHS=20
 
 ## 训练后步骤
 
-### 1. 审计所有结果
+### 1. 审计结果
 
 ```powershell
 .\.venv\Scripts\python.exe -B scripts/audit_paper_results.py --split_file_tag formal_v1 --candidates mobilenetv4_conv_small --seeds 42,3407,2026 --output docs/paper_result_audit_full.csv
 ```
 
+上面的命令只审计默认 A3/Full 配置。审计 A0-A9 全消融矩阵使用：
+
+```powershell
+.\.venv\Scripts\python.exe -B scripts/audit_paper_results.py --split_file_tag formal_v1 --candidates mobilenetv4_conv_small --seeds 42,3407,2026 --ablation_id A0,A1,A2,A3,A4,A5,A6,A7,A8,A9 --output docs/paper_result_audit_full.csv
+```
+
 ### 2. 生成主表汇总
 
 ```powershell
-.\.venv\Scripts\python.exe -B scripts/summarize_paper_results.py --audit_csv docs/paper_result_audit_full.csv --seeds 42,3407,2026 --output docs/paper_result_summary.md
+.\.venv\Scripts\python.exe -B scripts/summarize_paper_results.py --audit docs/paper_result_audit_full.csv --candidates A0:timm/mobilenetv4_conv_small,A1:timm/mobilenetv4_conv_small,A2:timm/mobilenetv4_conv_small,A3:timm/mobilenetv4_conv_small,A4:timm/mobilenetv4_conv_small,A5:timm/mobilenetv4_conv_small,A6:timm/mobilenetv4_conv_small,A7:timm/mobilenetv4_conv_small,A8:timm/mobilenetv4_conv_small,A9:timm/mobilenetv4_conv_small --seeds 42,3407,2026 --output docs/paper_result_summary.md
 ```
 
 ### 3. 效率表
 
 ```powershell
-.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small
-.\.venv\Scripts\python.exe -B scripts/calc_params.py --backbone_source timm --backbone_name mobilenetv4_conv_small
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A0
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A1
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A2
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A3
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A4
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A5
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A6
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A7
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A8
+.\.venv\Scripts\python.exe -B scripts/benchmark_speed.py --backbone_source timm --backbone_name mobilenetv4_conv_small --ablation_id A9
 ```
+
+> 参数量/FLOPs 脚本若未接入 `--ablation_id`，只能作为默认 A3 参考；正式效率表应以支持 A0-A9 模块开关的脚本为准。
 
 ## 预期论文主表结构
 

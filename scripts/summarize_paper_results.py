@@ -18,6 +18,12 @@ def _candidate_key(row):
     return f"{source}/{backbone}" if source else backbone
 
 
+def _row_key(row):
+    candidate = _candidate_key(row)
+    ablation_id = row.get("ablation_id", "").strip()
+    return f"{ablation_id}:{candidate}" if ablation_id else candidate
+
+
 def _format_metric(values):
     if not values:
         return ""
@@ -43,7 +49,7 @@ def _read_ready_rows(audit_paths):
                     seed = int(row.get("seed", ""))
                 except ValueError:
                     continue
-                ready[(_candidate_key(row), seed)] = row
+                ready[(_row_key(row), seed)] = row
     return ready
 
 
@@ -51,6 +57,10 @@ def build_summary(audit_paths, candidates, seeds):
     ready_rows = _read_ready_rows(audit_paths)
     summary = []
     for candidate in candidates:
+        ablation_id = ""
+        candidate_name = candidate
+        if ":" in candidate:
+            ablation_id, candidate_name = candidate.split(":", 1)
         row_metrics = {field: [] for field in METRIC_FIELDS}
         ready_seeds = []
         missing_seeds = []
@@ -75,7 +85,9 @@ def build_summary(audit_paths, candidates, seeds):
 
         selected_values = row_metrics["selected_test_mae"]
         summary.append({
+            "ablation_id": ablation_id,
             "candidate": candidate,
+            "candidate_name": candidate_name,
             "status": status,
             "ready_seeds": ",".join(str(seed) for seed in ready_seeds),
             "missing_seeds": ",".join(str(seed) for seed in missing_seeds),
@@ -99,12 +111,12 @@ def write_markdown(rows, output_path, seeds):
         "",
         "Rows with `partial` or `missing` status are not final paper mean/std results.",
         "",
-        "| Candidate | Status | Ready seeds | Missing seeds | Mean Selected_Test_MAE | Std | Mean raw | Mean flip | Mean multi |",
-        "|---|---|---|---|---:|---:|---:|---:|---:|",
+        "| Ablation | Candidate | Status | Ready seeds | Missing seeds | Mean Selected_Test_MAE | Std | Mean raw | Mean flip | Mean multi |",
+        "|---|---|---|---|---|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
-            "| {candidate} | {status} | {ready_seeds} | {missing_seeds} | "
+            "| {ablation_id} | {candidate_name} | {status} | {ready_seeds} | {missing_seeds} | "
             "{mean_selected_test_mae} | {std_selected_test_mae} | "
             "{mean_mae_raw} | {mean_mae_flip} | {mean_mae_multi} |".format(**row)
         )

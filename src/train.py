@@ -140,13 +140,15 @@ def _average_loss_sums(loss_sums, batch_count):
     return {name: value / batch_count for name, value in loss_sums.items()}
 
 
-def _accumulate_loss_components(loss_sums, total_loss, kl_loss, l1_loss, rank_loss, mv_loss, triplet_loss=0.0):
+def _accumulate_loss_components(loss_sums, total_loss, kl_loss, l1_loss, rank_loss, mv_loss, triplet_loss=0.0, asym_loss=0.0, moe_gate_loss=0.0):
     loss_sums["total"] += total_loss
     loss_sums["kl"] += kl_loss
     loss_sums["l1"] += l1_loss
     loss_sums["rank"] += rank_loss
     loss_sums["mv"] += mv_loss
     loss_sums["triplet"] += triplet_loss
+    loss_sums["asym"] += asym_loss
+    loss_sums["moe_gate"] += moe_gate_loss
 
 
 def apply_hard_distillation_mode(cfg, train_loader, val_loader):
@@ -402,21 +404,21 @@ def train(args):
         training_log_path,
         [
             'Epoch',
-            'Train_Loss', 'Train_KL_Loss', 'Train_L1_Loss', 'Train_Rank_Loss', 'Train_MV_Loss', 'Train_Triplet_Loss',
-            'Train_MAE',
-            'Val_Loss', 'Val_KL_Loss', 'Val_L1_Loss', 'Val_Rank_Loss', 'Val_MV_Loss', 'Val_Triplet_Loss',
+            'Train_Loss', 'Train_KL_Loss', 'Train_L1_Loss', 'Train_Rank_Loss', 'Train_MV_Loss', 'Train_Triplet_Loss', 'Train_Asym_Loss', 'Train_MoE_Gate_Loss',
+            'Train_Mixup_MAE',
+            'Val_Loss', 'Val_KL_Loss', 'Val_L1_Loss', 'Val_Rank_Loss', 'Val_MV_Loss', 'Val_Triplet_Loss', 'Val_Asym_Loss', 'Val_MoE_Gate_Loss',
             'Val_MAE', 'LR', 'Time', 'Is_Best',
         ],
         resume=resume_training,
     )
     batch_logger = CSVLogger(
         batch_log_path,
-        ['Epoch', 'Batch', 'Total_Loss', 'KL_Loss', 'L1_Loss', 'Rank_Loss', 'MV_Loss', 'Triplet_Loss'],
+        ['Epoch', 'Batch', 'Total_Loss', 'KL_Loss', 'L1_Loss', 'Rank_Loss', 'MV_Loss', 'Triplet_Loss', 'Asym_Loss', 'MoE_Gate_Loss'],
         resume=resume_training,
     )
 
     # 初始化 TensorBoard Writer
-    log_dir = os.path.join(ROOT_DIR, "runs", f"{cfg.project_name}_seed{seed}_{int(time.time())}")
+    log_dir = os.path.join(ROOT_DIR, "runs", f"{training_metadata['experiment_id']}_{int(time.time())}")
     writer = SummaryWriter(log_dir=log_dir)
     print(f"📈 TensorBoard 日志目录: {log_dir}")
 
@@ -483,7 +485,7 @@ def train(args):
         train_samples = 0
         train_batches = 0
         optimizer_stepped = False
-        train_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0, "triplet": 0.0}
+        train_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0, "triplet": 0.0, "asym": 0.0, "moe_gate": 0.0}
         
         print(f"\nEpoch [{epoch+1}/{cfg.epochs}] Training (LR: {optimizer.param_groups[0]['lr']:.1e})...")
         
@@ -506,11 +508,13 @@ def train(args):
             
             # ⚡ AMP Forward
             with make_amp_context(cfg.device.type):
-                logits = model(images)
+                logits, embeddings, extras = model(images, return_features=True)
                 log_probs = F.log_softmax(logits, dim=1)
                 
                 # 计算 Combined Loss
-                loss, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet = criterion(log_probs, target_dists, true_ages, logits)
+                loss, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate = criterion(
+                    log_probs, target_dists, true_ages, logits, embeddings=embeddings, extras=extras
+                )
             
             # ⚡ AMP Backward
             scaler.scale(loss).backward()
@@ -532,7 +536,7 @@ def train(args):
             loss_value = loss.item()
             train_loss += loss_value
             train_batches += 1
-            _accumulate_loss_components(train_loss_sums, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet)
+            _accumulate_loss_components(train_loss_sums, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate)
             
             # 计算 MAE (Monitor)
             with torch.no_grad():
@@ -544,11 +548,12 @@ def train(args):
             if (batch_idx + 1) % 100 == 0:
                 print(
                     f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss_value:.4f} "
-                    f"(KL={loss_kl:.3f}, L1={loss_l1:.3f}, Rank={loss_rank:.3f}, MV={loss_mv:.3f}, Triplet={loss_triplet:.3f})"
+                    f"(KL={loss_kl:.3f}, L1={loss_l1:.3f}, Rank={loss_rank:.3f}, "
+                    f"MV={loss_mv:.3f}, Triplet={loss_triplet:.3f}, Asym={loss_asym:.3f}, MoE={loss_moe_gate:.3f})"
                 )
             
             if batch_idx % 10 == 0:
-                batch_logger.log([epoch + 1, batch_idx, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet])
+                batch_logger.log([epoch + 1, batch_idx, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate])
                 
                 # 📈 TensorBoard Logging (Step)
                 global_step = epoch * len(train_loader) + batch_idx
@@ -558,6 +563,8 @@ def train(args):
                 writer.add_scalar('Train/Loss_Rank', loss_rank, global_step)
                 writer.add_scalar('Train/Loss_MV', loss_mv, global_step)
                 writer.add_scalar('Train/Loss_Triplet', loss_triplet, global_step)
+                writer.add_scalar('Train/Loss_Asym', loss_asym, global_step)
+                writer.add_scalar('Train/Loss_MoE_Gate', loss_moe_gate, global_step)
                 writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], global_step)
 
             if max_train_batches is not None and train_batches >= max_train_batches:
@@ -579,7 +586,7 @@ def train(args):
             
         model.eval()
         mae_sum = 0.0
-        val_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0, "triplet": 0.0}
+        val_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0, "triplet": 0.0, "asym": 0.0, "moe_gate": 0.0}
         total_samples = 0
         val_batches = 0
         
@@ -593,10 +600,12 @@ def train(args):
                 target_dists = target_dists.to(cfg.device)
                 true_ages = true_ages.to(cfg.device)
                 
-                logits = model(images)
+                logits, embeddings, extras = model(images, return_features=True)
                 log_probs = F.log_softmax(logits, dim=1)
-                val_loss, val_kl, val_l1, val_rank, val_mv, val_triplet = criterion(log_probs, target_dists, true_ages, logits)
-                _accumulate_loss_components(val_loss_sums, val_loss.item(), val_kl, val_l1, val_rank, val_mv, val_triplet)
+                val_loss, val_kl, val_l1, val_rank, val_mv, val_triplet, val_asym, val_moe_gate = criterion(
+                    log_probs, target_dists, true_ages, logits, embeddings=embeddings, extras=extras
+                )
+                _accumulate_loss_components(val_loss_sums, val_loss.item(), val_kl, val_l1, val_rank, val_mv, val_triplet, val_asym, val_moe_gate)
                 val_batches += 1
                 
                 # Selection metric: multi-scale TTA MAE. Losses above use raw logits
@@ -623,7 +632,7 @@ def train(args):
         avg_val_loss = avg_val_components["total"]
         
         print(f"Epoch [{epoch+1}/{cfg.epochs}] | "
-              f"T_Loss: {avg_train_loss:.4f} | T_MAE: {avg_train_mae:.2f} | "
+              f"T_Loss: {avg_train_loss:.4f} | T_Mixup_MAE: {avg_train_mae:.2f} | "
               f"V_MAE: {val_mae:.2f}")
 
         # --- 3. 保存最佳模型 ---
@@ -652,6 +661,8 @@ def train(args):
             avg_train_components["rank"],
             avg_train_components["mv"],
             avg_train_components["triplet"],
+            avg_train_components["asym"],
+            avg_train_components["moe_gate"],
             avg_train_mae,
             avg_val_loss,
             avg_val_components["kl"],
@@ -659,6 +670,8 @@ def train(args):
             avg_val_components["rank"],
             avg_val_components["mv"],
             avg_val_components["triplet"],
+            avg_val_components["asym"],
+            avg_val_components["moe_gate"],
             val_mae,
             current_lr,
             elapsed,
@@ -672,13 +685,17 @@ def train(args):
         writer.add_scalar('Epoch/Train_Rank_Loss', avg_train_components["rank"], epoch + 1)
         writer.add_scalar('Epoch/Train_MV_Loss', avg_train_components["mv"], epoch + 1)
         writer.add_scalar('Epoch/Train_Triplet_Loss', avg_train_components["triplet"], epoch + 1)
-        writer.add_scalar('Epoch/Train_MAE', avg_train_mae, epoch + 1)
+        writer.add_scalar('Epoch/Train_Asym_Loss', avg_train_components["asym"], epoch + 1)
+        writer.add_scalar('Epoch/Train_MoE_Gate_Loss', avg_train_components["moe_gate"], epoch + 1)
+        writer.add_scalar('Epoch/Train_Mixup_MAE', avg_train_mae, epoch + 1)
         writer.add_scalar('Epoch/Val_Loss', avg_val_loss, epoch + 1)
         writer.add_scalar('Epoch/Val_KL_Loss', avg_val_components["kl"], epoch + 1)
         writer.add_scalar('Epoch/Val_L1_Loss', avg_val_components["l1"], epoch + 1)
         writer.add_scalar('Epoch/Val_Rank_Loss', avg_val_components["rank"], epoch + 1)
         writer.add_scalar('Epoch/Val_MV_Loss', avg_val_components["mv"], epoch + 1)
         writer.add_scalar('Epoch/Val_Triplet_Loss', avg_val_components["triplet"], epoch + 1)
+        writer.add_scalar('Epoch/Val_Asym_Loss', avg_val_components["asym"], epoch + 1)
+        writer.add_scalar('Epoch/Val_MoE_Gate_Loss', avg_val_components["moe_gate"], epoch + 1)
         writer.add_scalar('Epoch/Val_MAE', val_mae, epoch + 1)
         
         if epoch < 100 and optimizer_stepped:

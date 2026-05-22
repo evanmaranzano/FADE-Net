@@ -21,6 +21,7 @@ sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, 'src'))
 
 from config import Config
+from ablation_profiles import apply_ablation_profile, parse_ablation_ids
 from model import LightweightAgeEstimator
 from dataset import get_dataloaders
 from experiment import (
@@ -28,6 +29,7 @@ from experiment import (
     build_training_metadata,
     checkpoint_metadata_mismatches,
     load_model_state_package,
+    populate_runtime_model_metadata,
 )
 from evaluation import TTA_MODES, evaluate_mae
 
@@ -78,6 +80,7 @@ def discover_checkpoint_seeds(root_dir, cfg, epoch=111, candidate_seeds=DEFAULT_
 
 
 def apply_common_overrides(cfg, args):
+    apply_ablation_profile(cfg, getattr(args, "ablation_id", None))
     if args.split is not None:
         cfg.split_protocol = args.split
     if args.backbone_source is not None:
@@ -113,10 +116,12 @@ def main():
     parser.add_argument('--experiment_tag', type=str, help='Append tag to experiment id for smoke or side runs')
     parser.add_argument('--split_file_tag', type=str, help='Use tagged split file/artifact identity')
     parser.add_argument('--allow_legacy_split_upgrade', action='store_true', help='Trust and stamp a legacy split after size/index validation')
+    parser.add_argument('--ablation_id', type=str, choices=[item for item in parse_ablation_ids("A0,A1,A2,A3,A4,A5,A6,A7,A8,A9")], help='Apply an A0-A9 ablation profile')
     parser.add_argument('--overwrite', action='store_true', help='Overwrite an existing SWA artifact')
     args = parser.parse_args()
     cfg = Config()
     apply_common_overrides(cfg, args)
+    populate_runtime_model_metadata(cfg)
     _, _, test_loader, _ = get_dataloaders(cfg)
     
     # Parse epoch range

@@ -17,7 +17,14 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 from config import Config
 from dataset import file_sha256, split_filename_with_tag
 from experiment import artifact_path, build_training_metadata
-from audit_paper_results import audit_candidate, parse_seeds, populate_runtime_model_metadata, write_audit
+from audit_paper_results import (
+    apply_ablation_profile,
+    audit_candidate,
+    parse_ablation_ids,
+    parse_seeds,
+    populate_runtime_model_metadata,
+    write_audit,
+)
 
 
 class PaperResultAuditTests(unittest.TestCase):
@@ -96,6 +103,11 @@ class PaperResultAuditTests(unittest.TestCase):
     def test_parse_seeds_trims_empty_values(self):
         self.assertEqual([42, 3407, 2026], parse_seeds("42, 3407,,2026"))
 
+    def test_parse_ablation_ids_validates_known_ids(self):
+        self.assertEqual(["A0", "A7", "A9"], parse_ablation_ids("a0,A7, a9"))
+        with self.assertRaises(ValueError):
+            parse_ablation_ids("A10")
+
     def test_audit_blocks_untagged_complete_metadata_chain_for_paper_tables(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = self.make_config()
@@ -114,13 +126,40 @@ class PaperResultAuditTests(unittest.TestCase):
             cfg = self.make_config()
             metadata = self.write_paper_ready_artifacts(tmpdir, cfg, split_file_tag="formal_v1")
 
-            row = audit_candidate(Path(tmpdir), cfg, seed=42)
+            row = audit_candidate(Path(tmpdir), cfg, seed=42, ablation_id="A3")
 
         self.assertEqual("paper-ready", row["status"])
         self.assertEqual("formal_v1", row["split_file_tag"])
         self.assertEqual("formal_v1", metadata["split_file_tag"])
+        self.assertEqual("A3", row["ablation_id"])
         self.assertIn("dataset_split_AFAD_72_8_20_formal_v1.json", row["split_file"])
         self.assertIn("splitfile-formal_v1", row["experiment_id"])
+
+    def test_audit_distinguishes_loss_ablation_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_full = self.make_config()
+            cfg_triplet = self.make_config()
+            apply_ablation_profile(cfg_triplet, "A7")
+            cfg_asym = self.make_config()
+            apply_ablation_profile(cfg_asym, "A8")
+
+            self.write_paper_ready_artifacts(tmpdir, cfg_full, split_file_tag="formal_v1")
+            self.write_paper_ready_artifacts(tmpdir, cfg_triplet, split_file_tag="formal_v1")
+            self.write_paper_ready_artifacts(tmpdir, cfg_asym, split_file_tag="formal_v1")
+
+            full_row = audit_candidate(Path(tmpdir), cfg_full, seed=42, ablation_id="A3")
+            triplet_row = audit_candidate(Path(tmpdir), cfg_triplet, seed=42, ablation_id="A7")
+            asym_row = audit_candidate(Path(tmpdir), cfg_asym, seed=42, ablation_id="A8")
+
+        self.assertEqual("paper-ready", full_row["status"])
+        self.assertEqual("paper-ready", triplet_row["status"])
+        self.assertEqual("paper-ready", asym_row["status"])
+        self.assertNotEqual(full_row["result_path"], triplet_row["result_path"])
+        self.assertNotEqual(full_row["result_path"], asym_row["result_path"])
+        self.assertTrue(triplet_row["use_adaptive_triplet"])
+        self.assertTrue(asym_row["use_asymmetric_ordinal"])
+        self.assertIn("TRIPLET", triplet_row["experiment_id"])
+        self.assertIn("ASYM", asym_row["experiment_id"])
 
     def test_audit_blocks_checkpoint_metadata_mismatch_with_same_artifact_id(self):
         with tempfile.TemporaryDirectory() as tmpdir:

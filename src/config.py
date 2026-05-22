@@ -69,6 +69,8 @@ class Config:
         if getattr(self, 'use_texture_branch', False): tags.append("TEX")
         if getattr(self, 'use_freq_attention', False): tags.append("FREQ")
         if getattr(self, 'use_moe', False): tags.append("MOE")
+        if getattr(self, 'use_adaptive_triplet', False): tags.append("TRIPLET")
+        if getattr(self, 'use_asymmetric_ordinal', False): tags.append("ASYM")
         
         suffix = "_".join(tags) if tags else "Baseline"
         return f"{base}_{suffix}"
@@ -100,6 +102,7 @@ class Config:
     # MoE Head (M5)
     moe_num_experts = 3
     moe_hidden_dim = 256
+    lambda_moe_gate = 0.02
 
     # Asymmetric Ordinal Loss (M3)
     lambda_asym = 0.1

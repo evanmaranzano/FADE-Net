@@ -1,10 +1,8 @@
 import argparse
 import csv
-import io
 import json
 import os
 import sys
-from contextlib import redirect_stdout
 from pathlib import Path
 
 import torch
@@ -16,12 +14,22 @@ sys.path.insert(0, str(SRC_DIR))
 
 from config import Config
 from dataset import file_sha256
-from experiment import artifact_path, build_training_metadata, checkpoint_metadata_mismatches
-from model import LightweightAgeEstimator
+from ablation_profiles import (
+    ABLATION_FIELDS,
+    apply_ablation_profile,
+    ablation_row_flags,
+    parse_ablation_ids,
+)
+from experiment import (
+    artifact_path,
+    build_training_metadata,
+    checkpoint_metadata_mismatches,
+    populate_runtime_model_metadata,
+)
 from run_backbone_screening import parse_result_metrics, select_candidates
 
-
 AUDIT_FIELDS = [
+    "ablation_id",
     "source",
     "backbone",
     "seed",
@@ -42,6 +50,7 @@ AUDIT_FIELDS = [
     "split_fingerprint",
     "dataset_fingerprint",
     "legacy_split_upgraded",
+    *ABLATION_FIELDS,
 ]
 
 PAPER_SPLIT_FILE_TAG = "formal_v1"
@@ -59,19 +68,8 @@ def config_for_candidate(args, source, name):
     cfg.backbone_pretrained = not args.no_pretrained
     cfg.experiment_tag = args.experiment_tag
     cfg.split_file_tag = getattr(args, "split_file_tag", None)
+    apply_ablation_profile(cfg, getattr(args, "ablation_id", None))
     return cfg
-
-
-def populate_runtime_model_metadata(cfg):
-    """Mirror train.py metadata setup without downloading pretrained weights."""
-    original_pretrained = cfg.backbone_pretrained
-    cfg.backbone_pretrained = False
-    try:
-        with torch.no_grad(), redirect_stdout(io.StringIO()):
-            model = LightweightAgeEstimator(cfg)
-        del model
-    finally:
-        cfg.backbone_pretrained = original_pretrained
 
 
 def load_checkpoint_metadata(path):
@@ -113,7 +111,7 @@ def load_split_payload(root_dir, split_file, reasons):
     return split_path, payload
 
 
-def audit_candidate(root_dir, cfg, seed):
+def audit_candidate(root_dir, cfg, seed, ablation_id=""):
     reasons = []
     result_path = Path(artifact_path(str(root_dir), "final_result", cfg, seed, ".txt"))
     best_model_path = Path(artifact_path(str(root_dir), "best_model", cfg, seed, ".pth"))
@@ -218,6 +216,7 @@ def audit_candidate(root_dir, cfg, seed):
         )
 
     return {
+        "ablation_id": ablation_id or "",
         "source": cfg.backbone_source,
         "backbone": cfg.backbone_name,
         "seed": seed,
@@ -238,6 +237,7 @@ def audit_candidate(root_dir, cfg, seed):
         "split_fingerprint": split_fingerprint or "",
         "dataset_fingerprint": dataset_fingerprint or "",
         "legacy_split_upgraded": legacy_split_upgraded,
+        **ablation_row_flags(cfg),
     }
 
 
@@ -258,14 +258,17 @@ def main():
     parser.add_argument("--pretrained", dest="no_pretrained", action="store_false", help="Enable pretrained backbones")
     parser.add_argument("--experiment_tag", type=str, help="Audit a tagged side run instead of formal untagged artifacts")
     parser.add_argument("--split_file_tag", type=str, help="Audit tagged split file/artifact identity")
+    parser.add_argument("--ablation_id", type=str, help="Comma-separated ablation ids to audit, e.g. A0,A3,A9")
     parser.add_argument("--output", type=str, default=str(ROOT_DIR / "docs" / "paper_result_audit.csv"))
     args = parser.parse_args()
 
     rows = []
-    for source, name in select_candidates(args.candidates):
-        cfg = config_for_candidate(args, source, name)
-        for seed in parse_seeds(args.seeds):
-            rows.append(audit_candidate(ROOT_DIR, cfg, seed))
+    for ablation_id in parse_ablation_ids(args.ablation_id):
+        args.ablation_id = ablation_id
+        for source, name in select_candidates(args.candidates):
+            cfg = config_for_candidate(args, source, name)
+            for seed in parse_seeds(args.seeds):
+                rows.append(audit_candidate(ROOT_DIR, cfg, seed, ablation_id=ablation_id or ""))
 
     output_path = Path(args.output)
     write_audit(rows, output_path)

@@ -27,3 +27,18 @@ def test_adaptive_triplet_small_input():
     ages = torch.tensor([30.0])
     loss = loss_fn(embeddings, ages)
     assert loss.item() == 0.0, "Single sample should produce zero loss"
+
+
+def test_adaptive_triplet_negative_mask_uses_anchor_axis():
+    """Negative samples must be selected by anchor age, not positive-pair age."""
+    loss_fn = AdaptiveTripletLoss(base_margin=1.0, alpha=0.0, age_threshold=3.0)
+    embeddings = torch.tensor([
+        [0.0],
+        [0.5],
+        [4.0],
+    ])
+    ages = torch.tensor([10.0, 11.0, 12.0])
+
+    loss = loss_fn(embeddings, ages)
+
+    assert loss.item() == 0.0, "No anchor has a valid negative sample, so loss must be zero"

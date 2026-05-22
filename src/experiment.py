@@ -5,6 +5,23 @@ from typing import Any
 import torch
 
 
+def populate_runtime_model_metadata(config) -> None:
+    """Fill model-derived metadata fields without downloading pretrained weights."""
+    from contextlib import redirect_stdout
+    import io
+
+    from model import LightweightAgeEstimator
+
+    original_pretrained = getattr(config, "backbone_pretrained", True)
+    config.backbone_pretrained = False
+    try:
+        with torch.no_grad(), redirect_stdout(io.StringIO()):
+            model = LightweightAgeEstimator(config)
+        del model
+    finally:
+        config.backbone_pretrained = original_pretrained
+
+
 def sanitize_token(value: Any) -> str:
     token = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value).strip())
     return token.strip("._-") or "unset"
@@ -53,6 +70,11 @@ def ablation_signature(config) -> dict[str, bool]:
         "use_multi_scale": bool(getattr(config, "use_multi_scale", False)),
         "use_spp": bool(getattr(config, "use_spp", False)),
         "use_mv_loss": bool(getattr(config, "use_mv_loss", False)),
+        "use_texture_branch": bool(getattr(config, "use_texture_branch", False)),
+        "use_freq_attention": bool(getattr(config, "use_freq_attention", False)),
+        "use_moe": bool(getattr(config, "use_moe", False)),
+        "use_adaptive_triplet": bool(getattr(config, "use_adaptive_triplet", False)),
+        "use_asymmetric_ordinal": bool(getattr(config, "use_asymmetric_ordinal", False)),
     }
 
 
@@ -61,6 +83,17 @@ def loss_signature(config) -> dict[str, Any]:
         "lambda_l1": getattr(config, "lambda_l1", None),
         "lambda_rank": getattr(config, "lambda_rank", None),
         "lambda_mv": getattr(config, "lambda_mv", None),
+        "lambda_triplet": getattr(config, "lambda_triplet", None),
+        "triplet_base_margin": getattr(config, "triplet_base_margin", None),
+        "triplet_alpha": getattr(config, "triplet_alpha", None),
+        "triplet_age_threshold": getattr(config, "triplet_age_threshold", None),
+        "lambda_asym": getattr(config, "lambda_asym", None),
+        "asym_under_weight": getattr(config, "asym_under_weight", None),
+        "asym_over_weight": getattr(config, "asym_over_weight", None),
+        "asym_delta": getattr(config, "asym_delta", None),
+        "moe_num_experts": getattr(config, "moe_num_experts", None),
+        "moe_hidden_dim": getattr(config, "moe_hidden_dim", None),
+        "lambda_moe_gate": getattr(config, "lambda_moe_gate", None),
         "use_reweighting": bool(getattr(config, "use_reweighting", False)),
         "lds_sigma": getattr(config, "lds_sigma", None),
     }
@@ -179,3 +212,42 @@ def load_model_state_package(path: str, device):
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         return checkpoint["model_state_dict"], checkpoint
     return checkpoint, {"metadata": {}}
+
+
+def format_metadata_mismatches(mismatches) -> str:
+    return ", ".join([f"{key}: checkpoint={old!r}, current={new!r}" for key, old, new in mismatches])
+
+
+def is_compatible_checkpoint(path: str, config, seed: int, device="cpu"):
+    try:
+        _state_dict, checkpoint = load_model_state_package(path, device)
+    except Exception as exc:
+        return False, f"load failed: {exc}"
+    expected_metadata = build_training_metadata(config, seed)
+    mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+    if mismatches:
+        return False, format_metadata_mismatches(mismatches)
+    return True, ""
+
+
+def compatible_best_model_paths(root_dir: str, config, seed: int = 42, device="cpu"):
+    exact_path = artifact_path(root_dir, "best_model", config, seed, ".pth")
+    candidates = []
+    if os.path.exists(exact_path):
+        candidates.append(exact_path)
+    for name in sorted(os.listdir(root_dir)):
+        path = os.path.join(root_dir, name)
+        if path == exact_path:
+            continue
+        if name.startswith("best_model_") and name.endswith(".pth") and os.path.isfile(path):
+            candidates.append(path)
+
+    compatible = []
+    incompatible = []
+    for path in candidates:
+        ok, reason = is_compatible_checkpoint(path, config, seed, device=device)
+        if ok:
+            compatible.append(path)
+        else:
+            incompatible.append((path, reason))
+    return compatible, incompatible

@@ -23,7 +23,13 @@ from dataset import (
     split_filename_with_tag,
 )
 from evaluation import TTA_MODES, evaluate_mae, normalize_tta_mode, predict_probs
-from experiment import artifact_path, build_training_metadata, checkpoint_metadata_mismatches
+from experiment import (
+    artifact_path,
+    build_training_metadata,
+    checkpoint_metadata_mismatches,
+    compatible_best_model_paths,
+    is_compatible_checkpoint,
+)
 from swa_average import average_checkpoints, discover_checkpoint_seeds
 from train import _guard_fresh_artifact_overwrite, amp_step_was_skipped, make_grad_scaler, parse_selected_test_mae
 
@@ -251,6 +257,33 @@ class ExperimentIntegrityTests(unittest.TestCase):
         mismatches = checkpoint_metadata_mismatches({"metadata": default_meta}, tagged_meta)
         self.assertIn("split_file_tag", {key for key, _, _ in mismatches})
 
+    def test_new_loss_modules_separate_artifacts_and_metadata(self):
+        cfg_full = self.make_config()
+        cfg_triplet = self.make_config()
+        cfg_triplet.use_adaptive_triplet = True
+        cfg_asym = self.make_config()
+        cfg_asym.use_asymmetric_ordinal = True
+
+        full_meta = build_training_metadata(cfg_full, seed=42)
+        triplet_meta = build_training_metadata(cfg_triplet, seed=42)
+        asym_meta = build_training_metadata(cfg_asym, seed=42)
+
+        self.assertNotEqual(full_meta["experiment_id"], triplet_meta["experiment_id"])
+        self.assertNotEqual(full_meta["experiment_id"], asym_meta["experiment_id"])
+        self.assertIn("TRIPLET", triplet_meta["experiment_id"])
+        self.assertIn("ASYM", asym_meta["experiment_id"])
+        self.assertTrue(triplet_meta["ablations"]["use_adaptive_triplet"])
+        self.assertTrue(asym_meta["ablations"]["use_asymmetric_ordinal"])
+        self.assertEqual(cfg_triplet.lambda_triplet, triplet_meta["loss"]["lambda_triplet"])
+        self.assertEqual(cfg_asym.lambda_asym, asym_meta["loss"]["lambda_asym"])
+
+        full_path = artifact_path(str(ROOT_DIR), "final_result", cfg_full, seed=42, extension=".txt")
+        triplet_path = artifact_path(str(ROOT_DIR), "final_result", cfg_triplet, seed=42, extension=".txt")
+        asym_path = artifact_path(str(ROOT_DIR), "final_result", cfg_asym, seed=42, extension=".txt")
+
+        self.assertNotEqual(full_path, triplet_path)
+        self.assertNotEqual(full_path, asym_path)
+
     def test_split_filename_with_tag_preserves_default_and_sanitizes_tag(self):
         self.assertEqual(
             "dataset_split_AFAD_72_8_20.json",
@@ -371,6 +404,27 @@ class ExperimentIntegrityTests(unittest.TestCase):
         mismatches = checkpoint_metadata_mismatches({"metadata": checkpoint_meta}, expected)
 
         self.assertIn("dataset_fingerprint", {key for key, _, _ in mismatches})
+
+    def test_compatible_best_model_paths_filters_metadata_mismatch(self):
+        cfg = self.make_config()
+        matching_meta = build_training_metadata(cfg, seed=42)
+        mismatched_cfg = self.make_config()
+        mismatched_cfg.use_spp = not cfg.use_spp
+        mismatched_meta = build_training_metadata(mismatched_cfg, seed=42)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            good_path = artifact_path(tmpdir, "best_model", cfg, 42, ".pth")
+            bad_path = os.path.join(tmpdir, "best_model_wrong_seed42.pth")
+            torch.save({"model_state_dict": {"w": torch.ones(1)}, "metadata": matching_meta}, good_path)
+            torch.save({"model_state_dict": {"w": torch.ones(1)}, "metadata": mismatched_meta}, bad_path)
+
+            compatible, incompatible = compatible_best_model_paths(tmpdir, cfg, seed=42, device="cpu")
+            ok, reason = is_compatible_checkpoint(good_path, cfg, seed=42, device="cpu")
+
+        self.assertTrue(ok, reason)
+        self.assertEqual([good_path], compatible)
+        self.assertEqual(1, len(incompatible))
+        self.assertIn("best_model_wrong_seed42.pth", incompatible[0][0])
 
     def test_fresh_artifact_guard_refuses_existing_non_checkpoint_artifacts(self):
         cfg = self.make_config()

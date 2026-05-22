@@ -11,6 +11,13 @@ SRC_DIR = ROOT_DIR / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 from config import Config
+from ablation_profiles import (
+    ABLATION_FIELDS,
+    ablation_cli_flags,
+    ablation_row_flags,
+    apply_ablation_profile,
+    parse_ablation_ids,
+)
 from experiment import artifact_path, build_training_metadata, optional_sanitize_token
 
 DEFAULT_CANDIDATES = (
@@ -27,6 +34,8 @@ MANIFEST_FIELDS = [
     "epochs",
     "split",
     "split_file_tag",
+    "ablation_id",
+    *ABLATION_FIELDS,
     "status",
     "returncode",
     "selected_test_mae",
@@ -103,6 +112,7 @@ def build_command(args, source, name):
         command.append("--allow_legacy_split_upgrade")
     if args.overwrite_artifacts:
         command.append("--overwrite_artifacts")
+    command.extend(ablation_cli_flags(getattr(args, "ablation_id", None)))
     if source != "torchvision" or name != "mobilenet_v3_large":
         command.extend(["--backbone_source", source, "--backbone_name", name])
     return command
@@ -163,6 +173,7 @@ def config_for_candidate(args, source, name):
     cfg.experiment_tag = args.experiment_tag
     cfg.split_file_tag = getattr(args, "split_file_tag", None)
     cfg.allow_legacy_split_upgrade = bool(args.allow_legacy_split_upgrade)
+    apply_ablation_profile(cfg, getattr(args, "ablation_id", None))
     if args.afad_dir:
         cfg.afad_dir = os.path.abspath(args.afad_dir)
     return cfg
@@ -173,8 +184,9 @@ def log_paths_for_candidate(args, source, name):
     weight_tag = "scratch" if args.no_pretrained else "pretrained"
     split_file_tag = optional_sanitize_token(getattr(args, "split_file_tag", None))
     split_tag = f"_splitfile-{split_file_tag}" if split_file_tag else ""
+    ablation_tag = f"_{args.ablation_id}" if getattr(args, "ablation_id", None) else ""
     tag = f"_{args.experiment_tag}" if args.experiment_tag else ""
-    stem = f"{source}_{name}_{weight_tag}_{args.split}{split_tag}_seed{args.seed}{tag}"
+    stem = f"{source}_{name}_{weight_tag}_{args.split}{split_tag}{ablation_tag}_seed{args.seed}{tag}"
     return log_dir / f"{stem}.out.log", log_dir / f"{stem}.err.log"
 
 
@@ -206,6 +218,7 @@ def main():
     parser.add_argument("--max_test_batches", type=int, help="Limit valid test batches for pipeline smoke tests")
     parser.add_argument("--experiment_tag", type=str, help="Append tag to experiment id for smoke or side runs")
     parser.add_argument("--split_file_tag", type=str, help="Use a tagged split file/artifact identity, e.g. formal_v1")
+    parser.add_argument("--ablation_id", type=str, choices=[item for item in parse_ablation_ids("A0,A1,A2,A3,A4,A5,A6,A7,A8,A9")], help="Apply one A0-A9 ablation profile")
     parser.add_argument("--candidates", type=str, help="Comma-separated backbone names or source/name pairs to run")
     parser.add_argument("--run", action="store_true", help="Actually run training; default only prints commands")
     parser.add_argument("--append", action="store_true", help="Preserve existing manifest rows and append new rows")
@@ -268,6 +281,8 @@ def main():
                     "epochs": args.epochs,
                     "split": args.split,
                     "split_file_tag": getattr(args, "split_file_tag", "") or "",
+                    "ablation_id": args.ablation_id or "",
+                    **ablation_row_flags(cfg),
                     "status": status,
                     "returncode": returncode,
                     "selected_test_mae": "",
@@ -298,6 +313,8 @@ def main():
             "epochs": args.epochs,
             "split": args.split,
             "split_file_tag": getattr(args, "split_file_tag", "") or "",
+            "ablation_id": args.ablation_id or "",
+            **ablation_row_flags(cfg),
             "status": status,
             "returncode": returncode,
             "selected_test_mae": metrics["selected_test_mae"],

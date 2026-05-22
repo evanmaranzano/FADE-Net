@@ -21,6 +21,14 @@ from PyQt5.QtGui import QImage, QPixmap, QFont, QPainter, QColor, QPen, QBrush
 
 from model import LightweightAgeEstimator
 from config import Config, ROOT_DIR # Added ROOT_DIR
+from experiment import (
+    artifact_path,
+    build_training_metadata,
+    checkpoint_metadata_mismatches,
+    compatible_best_model_paths,
+    format_metadata_mismatches,
+    load_model_state_package,
+)
 from utils import DLDLProcessor
 
 # ================= 样式表 =================
@@ -291,6 +299,31 @@ def multi_scale_tta(images, model):
     # 平均 6 个预测
     return torch.stack(all_probs, dim=0).mean(dim=0)
 
+
+def load_compatible_weights(model, cfg, model_path, device, seed=42):
+    state_dict, checkpoint = load_model_state_package(model_path, device)
+    expected_metadata = build_training_metadata(cfg, seed)
+    mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+    if mismatches:
+        raise RuntimeError(format_metadata_mismatches(mismatches))
+    model.load_state_dict(state_dict)
+    model.eval()
+
+
+def default_model_path(cfg, device, seed=42):
+    exact_path = artifact_path(ROOT_DIR, "best_model", cfg, seed, ".pth")
+    if os.path.exists(exact_path):
+        return exact_path
+    compatible, incompatible = compatible_best_model_paths(ROOT_DIR, cfg, seed=seed, device=device)
+    if compatible:
+        print(f"DEBUG: Auto-discovered compatible model: {os.path.basename(compatible[0])}", flush=True)
+        return compatible[0]
+    if incompatible:
+        print("⚠️ Found best_model files, but none match the current Config metadata.", flush=True)
+        for path, reason in incompatible[:5]:
+            print(f"   rejected {os.path.basename(path)}: {reason}", flush=True)
+    return None
+
 # ================= 后台处理线程 =================
 class WorkerThread(QThread):
     change_pixmap_signal = pyqtSignal(QImage)
@@ -317,6 +350,7 @@ class WorkerThread(QThread):
         
         self.cfg = Config()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model_loaded = False
         print(f"🚀 后端设备: {self.device}", flush=True)
         print("DEBUG: Initializing Model...", flush=True)
         
@@ -324,55 +358,19 @@ class WorkerThread(QThread):
             print("DEBUG: Instantiating LightweightAgeEstimator...", flush=True)
             self.model = LightweightAgeEstimator(self.cfg).to(self.device)
             
-            # Auto-discovery Logic
-            model_path = None
-            
-            # 1. Try Specific Seed 42 first (Academic Baseline)
-            path_candidate = os.path.join(ROOT_DIR, f"best_model_{self.cfg.project_name}_seed42.pth")
-            if os.path.exists(path_candidate):
-                model_path = path_candidate
-            
-            # 2. Try Generic Project Name
-            if not model_path:
-                path_candidate = os.path.join(ROOT_DIR, f"best_model_{self.cfg.project_name}.pth")
-                if os.path.exists(path_candidate):
-                    model_path = path_candidate
+            model_path = default_model_path(self.cfg, self.device)
 
-            # 3. Intelligent Scan: Find ANY best_model_*.pth
-            if not model_path:
-                import glob
-                # Look for files starting with best_model_ and ending with .pth
-                candidates = glob.glob(os.path.join(ROOT_DIR, "best_model_*.pth"))
-                # Filter out ones that might be something else? No, any best_model is likely good.
-                # Sort by modification time (newest first)
-                if candidates:
-                    candidates.sort(key=os.path.getmtime, reverse=True)
-                    model_path = candidates[0]
-                    print(f"DEBUG: Auto-discovered model: {os.path.basename(model_path)}")
-            
-            # 4. Fallback
-            if not model_path:
-                model_path = "best_model.pth"
-
-            print(f"⏳ Loading model from: {model_path}", flush=True)
-            if os.path.exists(model_path):
-                checkpoint = torch.load(model_path, map_location=self.device)
-                state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
-                self.model.load_state_dict(state_dict)
-                self.model.eval()
+            if model_path:
+                print(f"⏳ Loading model from: {model_path}", flush=True)
+                load_compatible_weights(self.model, self.cfg, model_path, self.device)
+                self.model_loaded = True
                 print("DEBUG: Model loaded successfully", flush=True)
             else:
-                print(f"⚠️ Model file not found: {model_path}. Please use 'Load Model' button.", flush=True)
-                # Ensure model exists but is not loaded with weights (random init) or just don't run inference?
-                # We'll just let it be random init but warn user
+                print("⚠️ No compatible model found. Please use 'Load Model' button.", flush=True)
         except Exception as e:
             print(f"❌ Model Initialization/Load failed: {e}", flush=True)
             traceback.print_exc()
-            # If model failed to load, we might want to stop or continue with untrain model?
-            # Continuing might crash later. But let's let it run to see error.
-            if not hasattr(self, 'model'):
-                 print("CRITICAL: Model object was not created. Creating dummy...", flush=True)
-            pass
+            self.model_loaded = False
     
 
         print("DEBUG: Initializing DLDLProcessor...", flush=True)
@@ -396,6 +394,11 @@ class WorkerThread(QThread):
 
     def run(self):
         self._run_flag = True
+        if not self.model_loaded:
+            print("❌ Model is not loaded; inference is disabled.", flush=True)
+            self._run_flag = False
+            self.finished_signal.emit()
+            return
         cap = None 
         
         try:
@@ -554,13 +557,12 @@ class WorkerThread(QThread):
         try:
             # Re-instantiate to be safe or just load weights? 
             # Ideally just load weights if arch is same. Assuming same arch for now.
-            checkpoint = torch.load(model_path, map_location=self.device)
-            state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
-            self.model.load_state_dict(state_dict)
-            self.model.eval()
+            load_compatible_weights(self.model, self.cfg, model_path, self.device)
+            self.model_loaded = True
             print("✅ New model loaded successfully", flush=True)
             return True, "Success"
         except Exception as e:
+            self.model_loaded = False
             print(f"❌ Failed to load model: {e}", flush=True)
             return False, str(e)
 
@@ -743,6 +745,9 @@ class MainWindow(QMainWindow):
         
     def start_camera(self):
         if self.thread.isRunning(): return
+        if not self.thread.model_loaded:
+            self.status_bar.showMessage("❌ No compatible model loaded.", 3000)
+            return
         self.btn_camera.setEnabled(False)
         self.btn_file.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -765,6 +770,9 @@ class MainWindow(QMainWindow):
 
     def open_file(self):
         if self.thread.isRunning(): return
+        if not self.thread.model_loaded:
+            self.status_bar.showMessage("❌ No compatible model loaded.", 3000)
+            return
         file_path, _ = QFileDialog.getOpenFileName(self, "选择文件", "", "媒体文件 (*.jpg *.png *.mp4 *.avi)")
         if file_path:
             ext = file_path.lower().split('.')[-1]

@@ -16,6 +16,15 @@ import os
 # Import local modules
 from model import LightweightAgeEstimator
 from config import Config, ROOT_DIR
+from experiment import (
+    artifact_path,
+    build_training_metadata,
+    checkpoint_metadata_mismatches,
+    compatible_best_model_paths,
+    format_metadata_mismatches,
+    load_model_state_package,
+    populate_runtime_model_metadata,
+)
 from utils import DLDLProcessor
 
 # ================= Configuration & Styles =================
@@ -192,35 +201,21 @@ def load_model(model_path=None):
     model = LightweightAgeEstimator(cfg).to(device)
     try:
         if model_path is None:
-            # 1. Try Specific Seed 42 first (Academic Baseline)
-            path_candidate = os.path.join(ROOT_DIR, f"best_model_{cfg.project_name}_seed42.pth")
-            if os.path.exists(path_candidate):
-                model_path = path_candidate
+            exact_path = artifact_path(ROOT_DIR, "best_model", cfg, 42, ".pth")
+            if os.path.exists(exact_path):
+                model_path = exact_path
+            else:
+                compatible, _incompatible = compatible_best_model_paths(ROOT_DIR, cfg, seed=42, device=device)
+                model_path = compatible[0] if compatible else None
             
-            # 2. Try Generic Project Name
-            if not model_path:
-                path_candidate = os.path.join(ROOT_DIR, f"best_model_{cfg.project_name}.pth")
-                if os.path.exists(path_candidate):
-                    model_path = path_candidate
-
-            # 3. Intelligent Scan: Find ANY best_model_*.pth
-            if not model_path:
-                import glob
-                # Look for files starting with best_model_ and ending with .pth
-                candidates = glob.glob(os.path.join(ROOT_DIR, "best_model_*.pth"))
-                if candidates:
-                    candidates.sort(key=os.path.getmtime, reverse=True)
-                    model_path = candidates[0]
-                    print(f"DEBUG: Auto-discovered model: {os.path.basename(model_path)}")
-            
-            # 4. Fallback
-            if not model_path:
-                model_path = os.path.join(ROOT_DIR, "best_model.pth")
-
-            
+        if model_path is None:
+            raise RuntimeError("No compatible best_model checkpoint found for current Config.")
         print(f"⏳ Loading model from: {model_path}")
-        checkpoint = torch.load(model_path, map_location=device)
-        state_dict = checkpoint['model_state_dict'] if 'model_state_dict' in checkpoint else checkpoint
+        state_dict, checkpoint = load_model_state_package(model_path, device)
+        expected_metadata = build_training_metadata(cfg, 42)
+        mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+        if mismatches:
+            raise RuntimeError(format_metadata_mismatches(mismatches))
         model.load_state_dict(state_dict)
         model.eval()
     except Exception as e:
@@ -345,13 +340,23 @@ def main():
     # Sidebar: Model Selection
     st.sidebar.markdown("## 🧠 Model Selection")
     
-    # Scan for .pth files
-    model_files = glob.glob(os.path.join(ROOT_DIR, "*.pth"))
-    model_files = [os.path.basename(f) for f in model_files if "checkpoint" not in f] # Filter out checkpoints if needed
-    model_files.sort()
+    cfg = Config()
+    device_for_scan = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    try:
+        populate_runtime_model_metadata(cfg)
+    except Exception as exc:
+        st.error(f"Model config initialization failed: {exc}")
+        st.info("Check the current Python environment and install project requirements if needed.")
+        st.stop()
+    compatible_models, incompatible_models = compatible_best_model_paths(ROOT_DIR, cfg, seed=42, device=device_for_scan)
+    model_files = [os.path.basename(f) for f in compatible_models]
     
     if not model_files:
-        st.error("No model files found in root directory!")
+        st.error("No metadata-compatible best_model checkpoint found in root directory.")
+        if incompatible_models:
+            with st.expander("Rejected checkpoints"):
+                for path, reason in incompatible_models:
+                    st.write(f"{os.path.basename(path)}: {reason}")
         st.stop()
         
     selected_model = st.sidebar.selectbox("Choose Model", model_files, index=0 if len(model_files) > 0 else 0)
@@ -359,7 +364,6 @@ def main():
 
     # Load Model
     model, dldl_tools, transform, face_detection, device = load_model(selected_model_path)
-    cfg = Config()
 
     if model is None:
         st.stop()
