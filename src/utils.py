@@ -133,13 +133,16 @@ class EMAModel:
     def apply_shadow(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
+                if name not in self.shadow:
+                    self.shadow[name] = param.data.clone()
                 self.backup[name] = param.data
                 param.data = self.shadow[name]
 
     def restore(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                assert name in self.backup
+                if name not in self.backup:
+                    raise KeyError(f"EMA restore: {name} not in backup. Was apply_shadow() called?")
                 param.data = self.backup[name]
         self.backup = {}
 

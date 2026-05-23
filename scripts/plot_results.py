@@ -148,7 +148,8 @@ def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
     plt.figure(figsize=(8, 6))
     ax1 = plt.gca()
     plt.plot(df_epoch['Epoch'], df_epoch['Train_Loss'], label='Train Loss', color='#2878B5')
-    plt.plot(df_epoch['Epoch'], df_epoch['Val_Loss'], label='Val Loss', color='#D76364', linestyle='--')
+    if 'Val_Loss' in df_epoch.columns:
+        plt.plot(df_epoch['Epoch'], df_epoch['Val_Loss'], label='Val Loss', color='#D76364', linestyle='--')
     add_best_model_line(ax1, best_epoch)
     plt.title('Loss Convergence')
     plt.xlabel('Epoch')
@@ -312,7 +313,10 @@ def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
     color_loss = '#D76364'
     ax1_dual.set_xlabel('Epoch')
     ax1_dual.set_ylabel('Val Loss', color=color_loss)
-    ax1_dual.plot(df_epoch['Epoch'], df_epoch['Val_Loss'], color=color_loss, label='Val Loss', linewidth=2)
+    if 'Val_Loss' in df_epoch.columns:
+        ax1_dual.plot(df_epoch['Epoch'], df_epoch['Val_Loss'], color=color_loss, label='Val Loss', linewidth=2)
+    else:
+        ax1_dual.plot(df_epoch['Epoch'], df_epoch['Train_Loss'], color=color_loss, label='Train Loss', linewidth=2)
     ax1_dual.tick_params(axis='y', labelcolor=color_loss)
     
     ax2_dual = ax1_dual.twinx()  # 实例化第二个轴

@@ -341,7 +341,7 @@ def train(args):
 
     optimizer = optim.AdamW(
         [
-            {'params': backbone_params, 'lr': cfg.learning_rate * 0.01},  # Backbone: ~3e-6 (1e-5 range)
+            {'params': backbone_params, 'lr': cfg.learning_rate * 0.1},   # Backbone: ~3e-5 (cosine -> 3e-6)
             {'params': head_params, 'lr': cfg.learning_rate}            # Head/Fusion: 3e-4
         ], 
         lr=cfg.learning_rate, 

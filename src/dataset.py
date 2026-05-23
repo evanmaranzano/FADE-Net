@@ -245,6 +245,7 @@ class AFADDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
+        original_idx = idx
         for attempt in range(3):
             try:
                 img_path = self.image_paths[idx]
@@ -259,7 +260,7 @@ class AFADDataset(Dataset):
                     idx = random.randint(0, len(self.image_paths) - 1)
                 else:
                     import warnings
-                    warnings.warn(f"Failed to load image after 3 attempts (last: {self.image_paths[idx]}): {e}")
+                    warnings.warn(f"Failed to load image after 3 attempts: {self.image_paths[original_idx]}: {e}")
                     return None
 
 
