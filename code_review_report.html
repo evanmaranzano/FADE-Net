@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FADE-Net Code Review Report</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --critical: #f85149;
+    --critical-bg: #f8514920;
+    --major: #d29922;
+    --major-bg: #d2992220;
+    --minor: #3fb950;
+    --minor-bg: #3fb95020;
+    --code-bg: #1c2128;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.8rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    color: var(--text);
+  }
+  .subtitle {
+    color: var(--text-muted);
+    font-size: 0.95rem;
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .meta-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  .meta-card .label {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+  }
+  .meta-card .value {
+    font-size: 1.3rem;
+    font-weight: 600;
+  }
+  .summary-bar {
+    display: flex;
+    gap: 1.5rem;
+    margin-bottom: 2rem;
+    flex-wrap: wrap;
+  }
+  .severity-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+  }
+  .severity-badge .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .dot-critical { background: var(--critical); }
+  .dot-major { background: var(--major); }
+  .dot-minor { background: var(--minor); }
+
+  h2 {
+    font-size: 1.3rem;
+    font-weight: 600;
+    margin: 2rem 0 1rem;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  h2 .section-icon {
+    font-size: 1.1rem;
+    opacity: 0.7;
+  }
+
+  .finding {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 1rem;
+    overflow: hidden;
+    transition: border-color 0.2s;
+  }
+  .finding:hover { border-color: var(--accent); }
+  .finding-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.85rem 1.1rem;
+    cursor: pointer;
+    user-select: none;
+  }
+  .finding-header:hover { background: #1c2128; }
+  .finding-id {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    min-width: 1.6rem;
+  }
+  .severity-tag {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .severity-critical { background: var(--critical-bg); color: var(--critical); border: 1px solid var(--critical); }
+  .severity-major { background: var(--major-bg); color: var(--major); border: 1px solid var(--major); }
+  .severity-minor { background: var(--minor-bg); color: var(--minor); border: 1px solid var(--minor); }
+
+  .finding-title {
+    flex: 1;
+    font-size: 0.92rem;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .finding-file {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.78rem;
+    color: var(--accent);
+    background: #58a6ff15;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .finding-chevron {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    transition: transform 0.2s;
+  }
+  .finding.open .finding-chevron { transform: rotate(90deg); }
+
+  .finding-body {
+    display: none;
+    padding: 0 1.1rem 1rem;
+    border-top: 1px solid var(--border);
+  }
+  .finding.open .finding-body { display: block; }
+
+  .detail-section {
+    margin-top: 0.85rem;
+  }
+  .detail-label {
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: 0.3rem;
+  }
+  .detail-text {
+    font-size: 0.88rem;
+    color: var(--text);
+    line-height: 1.55;
+  }
+  .detail-text code {
+    font-family: 'SFMono-Regular', Consolas, monospace;
+    font-size: 0.82rem;
+    background: var(--code-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 3px;
+    color: #f0883e;
+  }
+  .scenario-box {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.7rem 0.9rem;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: var(--text-muted);
+    margin-top: 0.4rem;
+  }
+
+  .fix-section {
+    margin-top: 2rem;
+  }
+  .fix-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin-bottom: 0.75rem;
+  }
+  .fix-item .fix-title {
+    font-weight: 600;
+    font-size: 0.92rem;
+    margin-bottom: 0.4rem;
+    color: var(--accent);
+  }
+  .fix-item .fix-desc {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.55;
+  }
+
+  .footer {
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    text-align: center;
+  }
+
+  @media (max-width: 640px) {
+    body { padding: 1rem; }
+    .meta-grid { grid-template-columns: 1fr 1fr; }
+    .finding-header { flex-wrap: wrap; }
+    .finding-file { order: 5; margin-top: 0.3rem; }
+  }
+</style>
+</head>
+<body>
+
+<h1>FADE-Net Code Review Report</h1>
+<p class="subtitle">Branch <code>feat/five-innovations</code> vs <code>main</code> &mdash; 5-angle parallel scan + 1-vote verify + gap sweep</p>
+
+<div class="meta-grid">
+  <div class="meta-card">
+    <div class="label">Files Changed</div>
+    <div class="value">49</div>
+  </div>
+  <div class="meta-card">
+    <div class="label">Lines Added</div>
+    <div class="value" style="color:var(--minor)">+6,739</div>
+  </div>
+  <div class="meta-card">
+    <div class="label">Lines Removed</div>
+    <div class="value" style="color:var(--critical)">-1,162</div>
+  </div>
+  <div class="meta-card">
+    <div class="label">Findings</div>
+    <div class="value">15</div>
+  </div>
+</div>
+
+<div class="summary-bar">
+  <span class="severity-badge"><span class="dot dot-critical"></span> Critical: 3</span>
+  <span class="severity-badge"><span class="dot dot-major"></span> Major: 8</span>
+  <span class="severity-badge"><span class="dot dot-minor"></span> Minor: 4</span>
+</div>
+
+<!-- ========== CRITICAL ========== -->
+<h2><span class="section-icon">&#9650;</span> Critical Findings</h2>
+
+<div class="finding open" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#1</span>
+    <span class="severity-tag severity-critical">Critical</span>
+    <span class="finding-title">build_training_metadata 在 get_dataloaders 之前调用，split_fingerprint 永远为 None</span>
+    <span class="finding-file">train.py:356</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text"><code>build_training_metadata(cfg, seed)</code> 在第 356 行调用，此时 <code>get_dataloaders(cfg)</code> 尚未执行，<code>config.split_metadata</code> 未填充。结果 checkpoint 元数据中 <code>split_fingerprint</code> 和 <code>dataset_fingerprint</code> 永远为 <code>None</code>。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">Run 1 训练到 epoch 15 保存 checkpoint（fingerprint=None）。Run 2 用 <code>--resume</code> 恢复，<code>get_dataloaders</code> 已填充真实 fingerprint。<code>checkpoint_metadata_mismatches</code> 检测到 fingerprint 不一致 → <code>RuntimeError</code>，resume 失败。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#2</span>
+    <span class="severity-tag severity-critical">Critical</span>
+    <span class="finding-title">L1 loss 与 asymmetric ordinal loss 双重惩罚，梯度偏向高估</span>
+    <span class="finding-file">utils.py:533</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text">当 <code>use_asymmetric_ordinal=True</code> 时，总损失同时包含 <code>lambda_l1 * l1</code>（标准 L1 回归）和 <code>lambda_asym * loss_asym</code>（方向加权 smooth L1）。Asymmetric ordinal loss 本应<strong>替代</strong>L1，而非叠加。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box"><code>lambda_l1=0.1, lambda_asym=1.0, under_weight=2.0</code>：5 年低估误差被 <code>0.1×5 + 1.0×(2.0×smooth_L1(5))</code> 双重惩罚。梯度分布偏向高估方向，MAE 退化。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#3</span>
+    <span class="severity-tag severity-critical">Critical</span>
+    <span class="finding-title">EMA shadow 在 backbone 解冻后仍持有初始权重，验证 MAE 使用损坏权重</span>
+    <span class="finding-file">utils.py:120-128</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text"><code>EMAModel.register()</code> 在所有参数 <code>requires_grad=True</code> 时注册 shadow。冻结 backbone 后 <code>ema.update()</code> 跳过 backbone 参数。解冻后 backbone shadow 仍为近初始权重。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box"><code>freeze_backbone_epochs=10</code>：解冻后首个 EMA 更新为 <code>0.001×current + 0.999×stale_initial</code>。EMA 验证使用近随机 backbone 权重数个 epoch。若此窗口内触发 "best model" 保存，选中的是损坏 checkpoint。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== MAJOR ========== -->
+<h2><span class="section-icon">&#9654;</span> Major Findings</h2>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#4</span>
+    <span class="severity-tag severity-major">Major</span>
+    <span class="finding-title">默认 backbone 静默从 MobileNetV3 切换为 MobileNetV4-Small</span>
+    <span class="finding-file">config.py:22-25</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text">默认 <code>backbone_source</code> 从 <code>torchvision</code> / <code>mobilenet_v3_large</code> 变为 <code>timm</code> / <code>mobilenetv4_conv_small</code>。所有不带 <code>--backbone_source</code> 的命令行调用会训练完全不同的架构。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">旧 split 文件 fingerprint 不兼容新 backbone；旧 checkpoint 不可用；消融指南中未显式指定 backbone 的命令产生错误结果。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#5</span>
+    <span class="severity-tag severity-major">Major</span>
+    <span class="finding-title">AdaptiveTripletLoss 构建 (B,B,B) 张量，O(B&sup3;) 内存</span>
+    <span class="finding-file">utils.py:330-355</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text"><code>AdaptiveTripletLoss.forward()</code> 构建 <code>violation</code> 和 <code>valid</code> 掩码各 <code>(B,B,B)</code>，单个张量 <code>B³×4</code> 字节。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box"><code>batch_size=128</code> → ~8MB/tensor × 2 + autograd 中间变量 → 约 50-80MB。Full+ 配置（MSFF+SPP+TEX+FREQ+MOE+TRIPLET+ASYM）在 8GB GPU 上必 OOM。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#6</span>
+    <span class="severity-tag severity-major">Major</span>
+    <span class="finding-title">验证循环每个 batch 执行 7 次前向传播，loss 仅用于日志</span>
+    <span class="finding-file">train.py:603+613</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text">第 603 行 <code>model(images, return_features=True)</code> 算 loss（1 次前向），第 613 行 <code>predict_probs(mode="multi")</code> 做 TTA（6 次前向）。Loss 结果仅写日志，模型选择用 MAE。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">AFAD 30K+ 验证集 × 120 epochs → 验证时间约 7 倍于必要。大规模消融实验（10 配置 × 3 seeds）下尤为严重。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#7</span>
+    <span class="severity-tag severity-major">Major</span>
+    <span class="finding-title">Backbone/Head 使用相同学习率，注释声称 backbone 用 1e-5</span>
+    <span class="finding-file">train.py:339</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text">两个参数组都用 <code>lr=cfg.learning_rate (3e-4)</code>。第 323 行注释声称 "Backbone gets smaller LR (1e-5 range)"，实际未实现。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">解冻后预训练 backbone 以 3e-4 微调，可能导致灾难性遗忘。尤其对 timm/MobileNetV4-Small 预训练权重危害更大。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#8</span>
+    <span class="severity-tag severity-major">Major</span>
+    <span class="finding-title">__getitem__ 删除重试逻辑，corrupt 图片直接返回 None</span>
+    <span class="finding-file">dataset.py:247-257</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text">旧代码有 3 次重试 + 随机索引兜底。新代码 <code>except Exception: return None</code>，首次失败即放弃。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">数据集有 0.5% 损坏文件 → 约 1.5% batch 被静默丢弃。有效训练数据减少，引入数据依赖的性能回退，但无任何报错。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#9</span>
+    <span class="severity-tag severity-major">Major</span>
+    <span class="finding-title">CombinedLoss 返回值从 4 个变为 8 个，外部调用者解包崩溃</span>
+    <span class="finding-file">utils.py:461</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text"><code>CombinedLoss.forward</code> 返回元组从 <code>(total, kl, l1, rank)</code> 变为 <code>(total, kl, l1, rank, mv, triplet, asym, moe_gate)</code>。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">任何外部脚本用 <code>total, kl, l1, rank = criterion(...)</code> 解包会 <code>ValueError: too many values to unpack</code>。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#10</span>
+    <span class="severity-tag severity-major">Major</span>
+    <span class="finding-title">FrequencyDomainAttention 2D fallback 用零填充，训练/推理分布不匹配</span>
+    <span class="finding-file">model.py:154-156</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text">收到 2D 输入时用 <code>torch.zeros_like</code> 拼接 3 通道描述符（DC + 2 个零通道）。compress 层训练时见真实 DCT 系数，推理时见零填充。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">架构变更使 freq_attention 在池化后执行时，注意力权重基于假 DCT 通道，channel recalibration 失效。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#11</span>
+    <span class="severity-tag severity-major">Major</span>
+    <span class="finding-title">LDS 权重归一化包含空 bin，稀释稀缺样本权重</span>
+    <span class="finding-file">dataset.py:318</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text"><code>np.mean(weights)</code> 包含空 bin（<code>1/(0+1e-5)</code> clip 到 10.0）。稀疏年龄分布下空 bin 权重 10.0 拉高均值，有效 bin 归一化后权重偏低。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">极端年龄样本少 → 空 bin 占多数 → 均值被 10.0 主导 → 有数据的 bin 权重被压缩 → 稀缺样本反而被降权，LDS 效果反转。注释标注为 "Reverted" 故意保留，但实际效果可能与预期相反。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== MINOR ========== -->
+<h2><span class="section-icon">&#9670;</span> Minor Findings</h2>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#12</span>
+    <span class="severity-tag severity-minor">Minor</span>
+    <span class="finding-title">__getitem__ 吞掉所有异常，磁盘/权限错误静默丢弃</span>
+    <span class="finding-file">dataset.py:256</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text"><code>except Exception: return None</code> 捕获所有异常，包括磁盘 I/O 错误、权限问题、OOM。训练继续但 batch size 萎缩，无报错。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">磁盘故障时 50% 图片静默丢失，训练指标失真但无告警。建议至少 log warning 并限制连续 None 计数。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#13</span>
+    <span class="severity-tag severity-minor">Minor</span>
+    <span class="finding-title">Demo TTA 硬编码 base_size=224</span>
+    <span class="finding-file">gui_demo.py:276 / web_demo.py:248</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text"><code>multi_scale_tta</code> 硬编码 <code>base_size=224</code>，不读 <code>config.img_size</code>。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box"><code>img_size</code> 改为 112 时 TTA 仍按 224 缩放（201/224/246），空间维度不匹配或预测退化。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#14</span>
+    <span class="severity-tag severity-minor">Minor</span>
+    <span class="finding-title">cudnn.benchmark = True 被 seed_everything 覆盖为 False</span>
+    <span class="finding-file">train.py:934</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text">第 934 行设置 <code>cudnn.benchmark = True</code>，但 <code>seed_everything()</code> 内部设 <code>cudnn.benchmark=False, cudnn.deterministic=True</code>。实际结果是确定性模式，benchmark 从未生效。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">代码误导读者认为 benchmark 已启用。无运行时错误，但丧失预期的卷积自动调优加速。</div>
+    </div>
+  </div>
+</div>
+
+<div class="finding" onclick="this.classList.toggle('open')">
+  <div class="finding-header">
+    <span class="finding-id">#15</span>
+    <span class="severity-tag severity-minor">Minor</span>
+    <span class="finding-title">SafeRandomErasing 用 Python random，Windows spawn 下破坏可复现性</span>
+    <span class="finding-file">dataset.py:356</span>
+    <span class="finding-chevron">&#9654;</span>
+  </div>
+  <div class="finding-body">
+    <div class="detail-section">
+      <div class="detail-label">Description</div>
+      <div class="detail-text">使用 <code>random.uniform</code> / <code>random.randint</code> 确定擦除矩形位置。Windows DataLoader 用 spawn（非 fork），worker 进程 RNG 未被 <code>seed_everything</code> 播种。</div>
+    </div>
+    <div class="detail-section">
+      <div class="detail-label">Failure Scenario</div>
+      <div class="scenario-box">同 seed 跑两次，random erasing 矩形位置不同，破坏实验可复现性。应改用 <code>torch.Generator</code> 并通过 worker_init_fn 播种。</div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== FIX SUGGESTIONS ========== -->
+<h2><span class="section-icon">&#128295;</span> Top 5 Fix Suggestions</h2>
+
+<div class="fix-section">
+  <div class="fix-item">
+    <div class="fix-title">#1 &mdash; Metadata Timing</div>
+    <div class="fix-desc">将 <code>build_training_metadata(cfg, seed)</code> 移到 <code>get_dataloaders(cfg)</code> 之后，确保 <code>split_fingerprint</code> 已填充。</div>
+  </div>
+  <div class="fix-item">
+    <div class="fix-title">#2 &mdash; Double Penalty</div>
+    <div class="fix-desc"><code>use_asymmetric_ordinal=True</code> 时将 <code>lambda_l1</code> 设为 0，或在 CombinedLoss 中条件跳过 L1 项。</div>
+  </div>
+  <div class="fix-item">
+    <div class="fix-title">#3 &mdash; EMA Stale Shadow</div>
+    <div class="fix-desc">解冻后用 <code>param.data.clone()</code> 重新注册 backbone 参数到 EMA shadow；或在 <code>register()</code> 中不按 <code>requires_grad</code> 过滤，改为记录所有参数名。</div>
+  </div>
+  <div class="fix-item">
+    <div class="fix-title">#5 &mdash; O(B&sup3;) Triplet</div>
+    <div class="fix-desc">改用 online semi-hard mining（O(B&sup2;)）或 sampled triplets，避免全对全 violation 矩阵。</div>
+  </div>
+  <div class="fix-item">
+    <div class="fix-title">#11 &mdash; LDS Normalization</div>
+    <div class="fix-desc">改为 <code>mean_weight = np.mean(weights[active_mask])</code>，只对有数据的 bin 求均值。当前 "故意保留" 的行为可能与预期效果相反。</div>
+  </div>
+</div>
+
+<div class="footer">
+  Generated by 6-agent parallel review &mdash; 5 angles &times; 8 candidates &rarr; 1-vote verify &rarr; gap sweep<br>
+  FADE-Net <code>feat/five-innovations</code> vs <code>main</code> &mdash; 2026-05-23
+</div>
+
+</body>
+</html>
