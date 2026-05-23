@@ -312,10 +312,11 @@ def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
     
     color_loss = '#D76364'
     ax1_dual.set_xlabel('Epoch')
-    ax1_dual.set_ylabel('Val Loss', color=color_loss)
     if 'Val_Loss' in df_epoch.columns:
+        ax1_dual.set_ylabel('Val Loss', color=color_loss)
         ax1_dual.plot(df_epoch['Epoch'], df_epoch['Val_Loss'], color=color_loss, label='Val Loss', linewidth=2)
     else:
+        ax1_dual.set_ylabel('Train Loss', color=color_loss)
         ax1_dual.plot(df_epoch['Epoch'], df_epoch['Train_Loss'], color=color_loss, label='Train Loss', linewidth=2)
     ax1_dual.tick_params(axis='y', labelcolor=color_loss)
     
@@ -326,7 +327,7 @@ def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
     ax2_dual.tick_params(axis='y', labelcolor=color_lr)
     ax2_dual.set_yscale('log')
 
-    plt.title('Validation Loss vs Learning Rate')
+    plt.title('Loss vs Learning Rate')
     fig.tight_layout()
     plt.savefig(f'{current_save_dir}/8_loss_lr_combined.png')
     plt.close()
