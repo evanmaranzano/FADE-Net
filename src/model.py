@@ -152,8 +152,7 @@ class FrequencyDomainAttention(nn.Module):
             x_flat = descriptor.transpose(1, 2).reshape(b, c * self.num_frequencies)
         else:
             b, c = x.shape
-            zeros = torch.zeros_like(x)
-            x_flat = torch.cat([x, zeros, zeros], dim=1)
+            x_flat = x.repeat(1, self.num_frequencies)
         attn = self.compress(x_flat)
         attn = self.norm(attn)
         attn = self.act(attn)

@@ -125,7 +125,8 @@ class EMAModel:
     def update(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
-                assert name in self.shadow
+                if name not in self.shadow:
+                    self.shadow[name] = param.data.clone()
                 new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
                 self.shadow[name] = new_average.clone()
 
@@ -530,7 +531,8 @@ class CombinedLoss(nn.Module):
             term_moe_gate = 0.0
 
         # 总损失
-        total_loss = w_kl + self.lambda_l1 * l1 + term_rank + term_mv + term_triplet + term_asym + term_moe_gate
+        l1_term = 0.0 if self.use_asymmetric_ordinal else self.lambda_l1 * l1
+        total_loss = w_kl + l1_term + term_rank + term_mv + term_triplet + term_asym + term_moe_gate
         return (
             total_loss,
             w_kl.detach().item(),

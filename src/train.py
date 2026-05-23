@@ -300,7 +300,8 @@ def train(args):
     # 2. 准备数据 (Stratified SOTA)
     # ==========================================
     train_loader, val_loader, test_loader, class_weights = get_dataloaders(cfg)
-    
+    training_metadata = build_training_metadata(cfg, seed)
+
     # 打印分布信息
     print(f"Dataset Size: Train={len(train_loader.dataset)}, Val={len(val_loader.dataset)}, Test={len(test_loader.dataset)}")
     
@@ -336,7 +337,7 @@ def train(args):
 
     optimizer = optim.AdamW(
         [
-            {'params': backbone_params, 'lr': cfg.learning_rate},       # Backbone: 3e-4 (Full Sprint)
+            {'params': backbone_params, 'lr': cfg.learning_rate * 0.01},  # Backbone: ~3e-6 (1e-5 range)
             {'params': head_params, 'lr': cfg.learning_rate}            # Head/Fusion: 3e-4
         ], 
         lr=cfg.learning_rate, 
@@ -353,7 +354,6 @@ def train(args):
     # --- 断点续训逻辑 ---
     start_epoch = 0
     best_mae = float('inf')
-    training_metadata = build_training_metadata(cfg, seed)
     checkpoint_path = artifact_path(ROOT_DIR, "last_checkpoint", cfg, seed, ".pth")
     best_model_path = artifact_path(ROOT_DIR, "best_model", cfg, seed, ".pth")
     training_log_path = artifact_path(ROOT_DIR, "training_log", cfg, seed, ".csv")
@@ -406,7 +406,6 @@ def train(args):
             'Epoch',
             'Train_Loss', 'Train_KL_Loss', 'Train_L1_Loss', 'Train_Rank_Loss', 'Train_MV_Loss', 'Train_Triplet_Loss', 'Train_Asym_Loss', 'Train_MoE_Gate_Loss',
             'Train_Mixup_MAE',
-            'Val_Loss', 'Val_KL_Loss', 'Val_L1_Loss', 'Val_Rank_Loss', 'Val_MV_Loss', 'Val_Triplet_Loss', 'Val_Asym_Loss', 'Val_MoE_Gate_Loss',
             'Val_MAE', 'LR', 'Time', 'Is_Best',
         ],
         resume=resume_training,
@@ -586,7 +585,6 @@ def train(args):
             
         model.eval()
         mae_sum = 0.0
-        val_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0, "triplet": 0.0, "asym": 0.0, "moe_gate": 0.0}
         total_samples = 0
         val_batches = 0
         
@@ -600,20 +598,12 @@ def train(args):
                 target_dists = target_dists.to(cfg.device)
                 true_ages = true_ages.to(cfg.device)
                 
-                logits, embeddings, extras = model(images, return_features=True)
-                log_probs = F.log_softmax(logits, dim=1)
-                val_loss, val_kl, val_l1, val_rank, val_mv, val_triplet, val_asym, val_moe_gate = criterion(
-                    log_probs, target_dists, true_ages, logits, embeddings=embeddings, extras=extras
-                )
-                _accumulate_loss_components(val_loss_sums, val_loss.item(), val_kl, val_l1, val_rank, val_mv, val_triplet, val_asym, val_moe_gate)
-                val_batches += 1
-                
-                # Selection metric: multi-scale TTA MAE. Losses above use raw logits
-                # so Train_* and Val_* loss columns remain comparable.
+                # Selection metric: multi-scale TTA MAE only.
                 probs = predict_probs(model, images, mode="multi", base_size=cfg.img_size)
                 pred_ages = probs_to_ages(probs, cfg.num_classes)
                 mae_sum += torch.sum(torch.abs(pred_ages - true_ages)).item()
                 total_samples += true_ages.size(0)
+                val_batches += 1
 
                 if max_val_batches is not None and val_batches >= max_val_batches:
                     print(f"🧪 Reached max_val_batches={max_val_batches}; ending validation loop.")
@@ -628,8 +618,6 @@ def train(args):
             raise RuntimeError("No valid validation samples were loaded.")
 
         val_mae = mae_sum / total_samples
-        avg_val_components = _average_loss_sums(val_loss_sums, val_batches)
-        avg_val_loss = avg_val_components["total"]
         
         print(f"Epoch [{epoch+1}/{cfg.epochs}] | "
               f"T_Loss: {avg_train_loss:.4f} | T_Mixup_MAE: {avg_train_mae:.2f} | "
@@ -664,14 +652,6 @@ def train(args):
             avg_train_components["asym"],
             avg_train_components["moe_gate"],
             avg_train_mae,
-            avg_val_loss,
-            avg_val_components["kl"],
-            avg_val_components["l1"],
-            avg_val_components["rank"],
-            avg_val_components["mv"],
-            avg_val_components["triplet"],
-            avg_val_components["asym"],
-            avg_val_components["moe_gate"],
             val_mae,
             current_lr,
             elapsed,
@@ -688,14 +668,6 @@ def train(args):
         writer.add_scalar('Epoch/Train_Asym_Loss', avg_train_components["asym"], epoch + 1)
         writer.add_scalar('Epoch/Train_MoE_Gate_Loss', avg_train_components["moe_gate"], epoch + 1)
         writer.add_scalar('Epoch/Train_Mixup_MAE', avg_train_mae, epoch + 1)
-        writer.add_scalar('Epoch/Val_Loss', avg_val_loss, epoch + 1)
-        writer.add_scalar('Epoch/Val_KL_Loss', avg_val_components["kl"], epoch + 1)
-        writer.add_scalar('Epoch/Val_L1_Loss', avg_val_components["l1"], epoch + 1)
-        writer.add_scalar('Epoch/Val_Rank_Loss', avg_val_components["rank"], epoch + 1)
-        writer.add_scalar('Epoch/Val_MV_Loss', avg_val_components["mv"], epoch + 1)
-        writer.add_scalar('Epoch/Val_Triplet_Loss', avg_val_components["triplet"], epoch + 1)
-        writer.add_scalar('Epoch/Val_Asym_Loss', avg_val_components["asym"], epoch + 1)
-        writer.add_scalar('Epoch/Val_MoE_Gate_Loss', avg_val_components["moe_gate"], epoch + 1)
         writer.add_scalar('Epoch/Val_MAE', val_mae, epoch + 1)
         
         if epoch < 100 and optimizer_stepped:
@@ -931,7 +903,7 @@ if __name__ == "__main__":
         else:
             args.use_moe = None
 
-        torch.backends.cudnn.benchmark = True
+        # cudnn.benchmark omitted: seed_everything() sets it to False anyway
         train(args)
         sys.exit(0)
 

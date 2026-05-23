@@ -245,16 +245,22 @@ class AFADDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        try:
-            img_path = self.image_paths[idx]
-            age = self.ages[idx]
-            image = Image.open(img_path).convert('RGB')
-            if self.transform:
-                image = self.transform(image)
-            label_dist = self.dldl_proc.generate_label_distribution(age)
-            return image, label_dist, torch.tensor(age, dtype=torch.float32)
-        except Exception:
-            return None
+        for attempt in range(3):
+            try:
+                img_path = self.image_paths[idx]
+                age = self.ages[idx]
+                image = Image.open(img_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                label_dist = self.dldl_proc.generate_label_distribution(age)
+                return image, label_dist, torch.tensor(age, dtype=torch.float32)
+            except Exception as e:
+                if attempt < 2:
+                    idx = random.randint(0, len(self.image_paths) - 1)
+                else:
+                    import warnings
+                    warnings.warn(f"Failed to load image after 3 attempts (last: {self.image_paths[idx]}): {e}")
+                    return None
 
 
 
@@ -313,17 +319,13 @@ def calculate_lds_weights(ages, config):
     smooth_hist = gaussian_filter1d(hist, sigma=sigma)
     weights = 1.0 / (smooth_hist + 1e-5)
     
-    # ⚖️ [Reverted] Normalization: Use all bins (including empty ones) 
-    # to replicate original "buggy" but effective behavior.
-    mean_weight = np.mean(weights)
-        
+    active_mask = hist > 0
+    mean_weight = np.mean(weights[active_mask])
+
     weights = weights / mean_weight
-    
+
     # 🛡️ Safety Clip: 防止稀缺样本权重过大导致梯度爆炸
     weights = np.clip(weights, 0.0, 10.0)
-    
-    # Re-calculate mask for logging purposes only
-    active_mask = hist > 0
     print(f"   -> Max Weight: {np.max(weights):.2f}, Mean (Active): {np.mean(weights[active_mask]):.2f}")
     
     weights_tensor = torch.tensor(weights, dtype=torch.float32).to(config.device)
@@ -368,15 +370,15 @@ class SafeRandomErasing(object):
 
         # Max retries to find a safe spot
         for attempt in range(20):
-            target_area = random.uniform(self.scale[0], self.scale[1]) * area
-            aspect_ratio = random.uniform(self.ratio[0], self.ratio[1])
+            target_area = (torch.rand(1).item() * (self.scale[1] - self.scale[0]) + self.scale[0]) * area
+            aspect_ratio = torch.rand(1).item() * (self.ratio[1] - self.ratio[0]) + self.ratio[0]
 
             h = int(round(math.sqrt(target_area * aspect_ratio)))
             w = int(round(math.sqrt(target_area / aspect_ratio)))
 
             if w < img_w and h < img_h:
-                i = random.randint(0, img_h - h)
-                j = random.randint(0, img_w - w)
+                i = torch.randint(0, img_h - h + 1, (1,)).item()
+                j = torch.randint(0, img_w - w + 1, (1,)).item()
                 
                 # Check Safety: Avoid obliterating the eyes/mouth completely
                 # Simple Heuristic: 
