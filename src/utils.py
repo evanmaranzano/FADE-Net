@@ -339,10 +339,18 @@ class AdaptiveTripletLoss(nn.Module):
         self.alpha = alpha
         self.age_threshold = age_threshold
 
+    _MAX_TRIPLET_BATCH = 64
+
     def forward(self, embeddings, ages):
         B = embeddings.shape[0]
         if B < 2:
             return torch.tensor(0.0, device=embeddings.device)
+        # Cap batch size to avoid O(B^3) memory blowup; subsample if needed.
+        if B > self._MAX_TRIPLET_BATCH:
+            idx = torch.randperm(B, device=embeddings.device)[:self._MAX_TRIPLET_BATCH]
+            embeddings = embeddings[idx]
+            ages = ages[idx]
+            B = self._MAX_TRIPLET_BATCH
         dist = torch.cdist(embeddings, embeddings, p=2)  # (B, B)
         age_diff = torch.abs(ages.unsqueeze(0) - ages.unsqueeze(1))  # (B, B)
         mask_pos = (age_diff < self.age_threshold).float()
@@ -533,6 +541,7 @@ class CombinedLoss(nn.Module):
         # 总损失
         l1_term = 0.0 if self.use_asymmetric_ordinal else self.lambda_l1 * l1
         total_loss = w_kl + l1_term + term_rank + term_mv + term_triplet + term_asym + term_moe_gate
+        # Return 8-tuple: (total, kl, l1, rank, mv, triplet, asym, moe_gate)
         return (
             total_loss,
             w_kl.detach().item(),

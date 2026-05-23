@@ -264,24 +264,24 @@ def draw_distribution_chart(prob_dist, width=400, height=200, peak_age=None, exp
     return canvas
 
 # ================= Multi-Scale TTA (6x) =================
-def multi_scale_tta(images, model):
+def multi_scale_tta(images, model, base_size=224):
     """
     激进 Multi-Scale TTA: 3个尺度 (0.9, 1.0, 1.1) x 2 (原始 + 翻转) = 6x 平均
     用于 Demo 提升预测精度
     """
     scales = [0.9, 1.0, 1.1]
     all_probs = []
-    
+
     for scale in scales:
         if scale != 1.0:
-            new_size = int(224 * scale)
+            new_size = int(base_size * scale)
             resized = F.interpolate(images, size=new_size, mode='bilinear', align_corners=False)
-            if new_size > 224:
-                start = (new_size - 224) // 2
-                resized = resized[:, :, start:start+224, start:start+224]
+            if new_size > base_size:
+                start = (new_size - base_size) // 2
+                resized = resized[:, :, start:start+base_size, start:start+base_size]
             else:
-                pad = (224 - new_size) // 2
-                resized = F.pad(resized, (pad, 224-new_size-pad, pad, 224-new_size-pad), mode='reflect')
+                pad = (base_size - new_size) // 2
+                resized = F.pad(resized, (pad, base_size-new_size-pad, pad, base_size-new_size-pad), mode='reflect')
         else:
             resized = images
         
@@ -475,7 +475,7 @@ class WorkerThread(QThread):
                             
                             with torch.no_grad():
                                 # === Multi-Scale TTA (6x: 0.9/1.0/1.1 + flip) ===
-                                probs = multi_scale_tta(input_tensor, self.model)
+                                probs = multi_scale_tta(input_tensor, self.model, base_size=self.cfg.img_size)
                                 
                                 raw_mean = self.dldl_tools.expectation_regression(probs).item()
                                 raw_peak = torch.argmax(probs, dim=1).item()

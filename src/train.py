@@ -277,6 +277,10 @@ def train(args):
         cfg.use_moe = args.use_moe
         print(f"🔧 CLI Override: MoE Head -> {cfg.use_moe}")
 
+    # Backbone source notice
+    if cfg.backbone_source == 'timm':
+        print(f"Using timm backbone: {cfg.backbone_name} (not torchvision)")
+
     # 🌱 Easter Egg: Print Seed Meaning
     if seed in cfg.ACADEMIC_SEEDS:
         print(f"✨ Seed {seed}: {cfg.ACADEMIC_SEEDS[seed]}")
