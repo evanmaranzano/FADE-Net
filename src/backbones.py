@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from typing import Callable
 
@@ -5,6 +6,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision.models import MobileNet_V3_Large_Weights, mobilenet_v3_large
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -74,10 +77,11 @@ class TorchvisionMobileNetV3Backbone(FeatureBackbone):
         weights = MobileNet_V3_Large_Weights.IMAGENET1K_V2 if pretrained else None
         try:
             self.model = mobilenet_v3_large(weights=weights)
-        except Exception as exc:
+        except (OSError, RuntimeError) as exc:
             if not pretrained:
                 raise
-            print(f"[Model] Failed to load ImageNet weights ({exc}); using random MobileNetV3-Large.")
+            logger.warning("[Model] Failed to load ImageNet weights (%s); using random MobileNetV3-Large.", exc)
+            print(f"[Model] WARNING: Failed to load ImageNet weights ({exc}); using random MobileNetV3-Large.", flush=True)
             self.model = mobilenet_v3_large(weights=None)
 
         self.features = self.model.features
@@ -124,8 +128,11 @@ class TorchvisionMobileNetV3Backbone(FeatureBackbone):
 
 
 class TimmFeatureBackbone(FeatureBackbone):
+    _msff_warning_emitted: bool
+
     def __init__(self, model_name: str, pretrained: bool = True):
         super().__init__()
+        self._msff_warning_emitted = False
         try:
             import timm
         except ImportError as exc:
@@ -135,7 +142,14 @@ class TimmFeatureBackbone(FeatureBackbone):
             ) from exc
 
         self.model_name = model_name
-        self.model = timm.create_model(model_name, pretrained=pretrained, features_only=True)
+        try:
+            self.model = timm.create_model(model_name, pretrained=pretrained, features_only=True)
+        except (OSError, RuntimeError) as exc:
+            if not pretrained:
+                raise
+            logger.warning("[Model] Failed to load timm pretrained weights (%s); using random %s.", exc, model_name)
+            print(f"[Model] WARNING: Failed to load timm pretrained weights ({exc}); using random {model_name}.", flush=True)
+            self.model = timm.create_model(model_name, pretrained=False, features_only=True)
         channels = list(self.model.feature_info.channels())
         if not channels:
             raise ValueError(f"timm backbone {model_name!r} did not expose feature_info channels.")
@@ -157,6 +171,13 @@ class TimmFeatureBackbone(FeatureBackbone):
         mid = max(shallow + 1, self.feature_count - 2)
         if mid >= self.feature_count:
             mid = self.feature_count - 1
+        if not self._msff_warning_emitted:
+            logger.warning(
+                "Requested MSFF indices %s exceed backbone feature_count=%d; "
+                "falling back to %s. This may affect experiment reproducibility.",
+                feature_indices, self.feature_count, (shallow, mid),
+            )
+            self._msff_warning_emitted = True
         return shallow, mid
 
 

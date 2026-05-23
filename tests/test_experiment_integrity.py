@@ -22,7 +22,7 @@ from dataset import (
     get_stratified_split,
     split_filename_with_tag,
 )
-from evaluation import TTA_MODES, evaluate_mae, normalize_tta_mode, predict_probs
+from evaluation import TTA_MODES, evaluate_mae, normalize_tta_mode, predict_age_with_uncertainty, predict_probs
 from experiment import (
     artifact_path,
     build_training_metadata,
@@ -30,6 +30,7 @@ from experiment import (
     compatible_best_model_paths,
     is_compatible_checkpoint,
 )
+from advanced_eval import evaluate_uncertainty
 from swa_average import average_checkpoints, discover_checkpoint_seeds
 from train import _guard_fresh_artifact_overwrite, amp_step_was_skipped, make_grad_scaler, parse_selected_test_mae
 
@@ -52,6 +53,19 @@ class RecordingLogitModel(torch.nn.Module):
     def forward(self, images):
         self.calls.append(images.detach().clone())
         return torch.zeros(images.size(0), self.num_classes, device=images.device)
+
+
+class SumLogitModel(torch.nn.Module):
+    def forward(self, images):
+        values = images.flatten(1).sum(dim=1)
+        return torch.stack([values, values * 0.5, -values], dim=1)
+
+
+class FlipSensitiveLogitModel(torch.nn.Module):
+    def forward(self, images):
+        left = images[:, :, :, 0].flatten(1).sum(dim=1)
+        right = images[:, :, :, -1].flatten(1).sum(dim=1)
+        return torch.stack([left, torch.zeros_like(left), right], dim=1)
 
 
 class ExperimentIntegrityTests(unittest.TestCase):
@@ -317,14 +331,99 @@ class ExperimentIntegrityTests(unittest.TestCase):
             1, 3, cfg.img_size, cfg.img_size
         )
 
-        for mode, expected_calls in {"raw": 1, "flip": 2, "multi": 6}.items():
+        for mode, expected_calls in {"raw": 1, "flip": 1, "multi": 1}.items():
             model = RecordingLogitModel(cfg.num_classes)
             predict_probs(model, images, mode=mode, base_size=cfg.img_size)
             self.assertEqual(expected_calls, len(model.calls), mode)
 
         model = RecordingLogitModel(cfg.num_classes)
         predict_probs(model, images, mode="flip", base_size=cfg.img_size)
-        self.assertTrue(torch.equal(torch.flip(model.calls[0], dims=[3]), model.calls[1]))
+        augmented = model.calls[0]
+        self.assertEqual(2, augmented.size(0))
+        self.assertTrue(torch.equal(torch.flip(augmented[0:1], dims=[3]), augmented[1:2]))
+        self.assertTrue(torch.equal(images, augmented[0:1]))
+
+    def test_tta_can_chunk_augmented_forward_passes(self):
+        cfg = self.make_config()
+        images = torch.arange(3 * cfg.img_size * cfg.img_size, dtype=torch.float32).reshape(
+            1, 3, cfg.img_size, cfg.img_size
+        )
+
+        model = RecordingLogitModel(cfg.num_classes)
+        predict_probs(model, images, mode="multi", base_size=cfg.img_size, max_augmented_batch_size=2)
+
+        self.assertEqual(3, len(model.calls))
+        self.assertEqual([2, 2, 2], [call.size(0) for call in model.calls])
+
+    def test_tta_chunked_and_batched_outputs_match(self):
+        cfg = self.make_config()
+        images = torch.arange(2 * 3 * cfg.img_size * cfg.img_size, dtype=torch.float32).reshape(
+            2, 3, cfg.img_size, cfg.img_size
+        )
+
+        batched = predict_probs(SumLogitModel(), images, mode="multi", base_size=cfg.img_size)
+        chunked = predict_probs(
+            SumLogitModel(),
+            images,
+            mode="multi",
+            base_size=cfg.img_size,
+            max_augmented_batch_size=1,
+        )
+
+        self.assertTrue(torch.equal(batched, chunked))
+
+    def test_tta_chunked_and_batched_outputs_match_flip(self):
+        cfg = self.make_config()
+        images = torch.arange(2 * 3 * cfg.img_size * cfg.img_size, dtype=torch.float32).reshape(
+            2, 3, cfg.img_size, cfg.img_size
+        )
+
+        batched = predict_probs(SumLogitModel(), images, mode="flip", base_size=cfg.img_size)
+        chunked = predict_probs(
+            SumLogitModel(),
+            images,
+            mode="flip",
+            base_size=cfg.img_size,
+            max_augmented_batch_size=1,
+        )
+
+        self.assertTrue(torch.equal(batched, chunked))
+
+    def test_tta_uncertainty_reports_view_disagreement(self):
+        cfg = self.make_config()
+        images = torch.arange(3 * cfg.img_size * cfg.img_size, dtype=torch.float32).reshape(
+            1, 3, cfg.img_size, cfg.img_size
+        )
+
+        raw_probs, raw_ages, raw_std = predict_age_with_uncertainty(
+            FlipSensitiveLogitModel(), images, mode="raw", base_size=cfg.img_size
+        )
+        flip_probs, flip_ages, flip_std = predict_age_with_uncertainty(
+            FlipSensitiveLogitModel(), images, mode="flip", base_size=cfg.img_size
+        )
+
+        self.assertEqual((1, cfg.num_classes), tuple(raw_probs.shape))
+        self.assertEqual((1,), tuple(raw_ages.shape))
+        self.assertTrue(torch.equal(torch.zeros_like(raw_std), raw_std))
+        self.assertEqual((1, cfg.num_classes), tuple(flip_probs.shape))
+        self.assertEqual((1,), tuple(flip_ages.shape))
+        self.assertGreater(flip_std.item(), 0.0)
+
+    def test_advanced_eval_uncertainty_summary(self):
+        cfg = self.make_config()
+        valid_batch = (
+            torch.arange(3 * cfg.img_size * cfg.img_size, dtype=torch.float32).reshape(
+                1, 3, cfg.img_size, cfg.img_size
+            ),
+            torch.zeros(1, cfg.num_classes),
+            torch.ones(1),
+        )
+
+        summary = evaluate_uncertainty(FlipSensitiveLogitModel(), [valid_batch], cfg, cfg.device, mode="flip")
+
+        self.assertEqual("flip", summary["mode"])
+        self.assertGreaterEqual(summary["mae"], 0.0)
+        self.assertGreater(summary["mean_age_std"], 0.0)
 
     def test_evaluate_mae_rejects_all_empty_batches(self):
         cfg = self.make_config()

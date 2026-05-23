@@ -1,5 +1,6 @@
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import torch
@@ -96,6 +97,34 @@ class ResearchRefactorTests(unittest.TestCase):
         self.assertTrue(meta["ablations"]["use_hybrid_attention"])
         self.assertFalse(meta["ablations"]["effective_hybrid_attention"])
         self.assertNotIn("_HA_", cfg.project_name)
+
+    def test_timm_pretrained_load_failure_falls_back_to_random_weights(self):
+        try:
+            from backbones import TimmFeatureBackbone
+        except ImportError:
+            self.skipTest("timm is not installed")
+
+        class FakeFeatureInfo:
+            def channels(self):
+                return [16, 32, 64]
+
+        class FakeTimmModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.feature_info = FakeFeatureInfo()
+
+        fake_model = FakeTimmModel()
+
+        with mock.patch(
+            "timm.create_model",
+            side_effect=[RuntimeError("offline weights unavailable"), fake_model],
+        ) as create_model:
+            backbone = TimmFeatureBackbone("mobilenetv4_conv_small", pretrained=True)
+
+        self.assertIs(backbone.model, fake_model)
+        self.assertEqual(2, create_model.call_count)
+        self.assertTrue(create_model.call_args_list[0].kwargs["pretrained"])
+        self.assertFalse(create_model.call_args_list[1].kwargs["pretrained"])
 
 
 if __name__ == "__main__":

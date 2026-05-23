@@ -18,14 +18,22 @@ from tqdm import tqdm
 # Add project root to path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(SCRIPT_DIR)
-sys.path.insert(0, ROOT_DIR)
 sys.path.insert(0, os.path.join(ROOT_DIR, 'src'))
+sys.path.insert(0, ROOT_DIR)
 
 from config import Config
 from ablation_profiles import apply_ablation_profile, parse_ablation_ids
 from model import LightweightAgeEstimator
 from dataset import get_dataloaders
-from evaluation import TTA_MODES, evaluate_mae, normalize_tta_mode, predict_probs, probs_to_ages
+from evaluation import (
+    TTA_MODES,
+    evaluate_mae,
+    mae_from_probs,
+    normalize_tta_mode,
+    predict_age_with_uncertainty,
+    predict_probs,
+    probs_to_ages,
+)
 from experiment import (
     artifact_path,
     build_training_metadata,
@@ -77,15 +85,21 @@ def selected_modes(tta_arg):
     return (normalize_tta_mode(tta_arg),)
 
 
-def ensemble_predict(models, images, mode, base_size):
+def ensemble_predict(models, images, mode, base_size, max_augmented_batch_size=None):
     """
     Ensemble prediction: average probability distributions from multiple models.
     """
-    all_probs = [predict_probs(model, images, mode=mode, base_size=base_size) for model in models]
+    all_probs = [
+        predict_probs(model, images, mode=mode, base_size=base_size,
+                       max_augmented_batch_size=max_augmented_batch_size)
+        for model in models
+    ]
     return torch.stack(all_probs, dim=0).mean(dim=0)
 
 
 def evaluate_ensemble(models, test_loader, config, device, modes):
+    for m in models:
+        m.train(mode=False)
     mae_sums = {mode: 0.0 for mode in modes}
     count = 0
 
@@ -98,7 +112,10 @@ def evaluate_ensemble(models, test_loader, config, device, modes):
             ages = ages.to(device)
 
             for mode in modes:
-                probs = ensemble_predict(models, images, mode=mode, base_size=config.img_size)
+                probs = ensemble_predict(
+                    models, images, mode=mode, base_size=config.img_size,
+                    max_augmented_batch_size=getattr(config, "tta_batch_size", None),
+                )
                 output_ages = probs_to_ages(probs, config.num_classes)
                 mae_sums[mode] += torch.abs(output_ages - ages).sum().item()
             count += images.size(0)
@@ -107,6 +124,41 @@ def evaluate_ensemble(models, test_loader, config, device, modes):
         raise RuntimeError("No valid evaluation samples were loaded.")
 
     return {mode: mae_sums[mode] / count for mode in modes}
+
+
+def evaluate_uncertainty(model, test_loader, config, device, mode="multi"):
+    model.train(mode=False)
+    mode = normalize_tta_mode(mode)
+    mae_sum = 0.0
+    std_sum = 0.0
+    count = 0
+
+    with torch.no_grad():
+        for images, _labels, ages in tqdm(test_loader, desc="Uncertainty Eval"):
+            if images.numel() == 0:
+                continue
+
+            images = images.to(device)
+            ages = ages.to(device)
+            mean_probs, _pred_ages, age_std = predict_age_with_uncertainty(
+                model,
+                images,
+                mode=mode,
+                base_size=config.img_size,
+                max_augmented_batch_size=getattr(config, "tta_batch_size", None),
+            )
+            mae_sum += mae_from_probs(mean_probs, ages, config.num_classes)
+            std_sum += age_std.sum().item()
+            count += images.size(0)
+
+    if count == 0:
+        raise RuntimeError("No valid evaluation samples were loaded.")
+
+    return {
+        "mae": mae_sum / count,
+        "mean_age_std": std_sum / count,
+        "mode": mode,
+    }
 
 
 def main():
@@ -125,11 +177,14 @@ def main():
     parser.add_argument('--allow_legacy_split_upgrade', action='store_true', help='Trust and stamp a legacy split after size/index validation')
     parser.add_argument('--ablation_id', type=str, choices=[item for item in parse_ablation_ids("A0,A1,A2,A3,A4,A5,A6,A7,A8,A9")], help='Apply an A0-A9 ablation profile')
     parser.add_argument('--model_path', type=str, help='Explicit model checkpoint path')
+    parser.add_argument('--uncertainty', action='store_true', help='Report TTA age standard deviation for single-model evaluation')
     args = parser.parse_args()
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cfg = Config()
     apply_common_overrides(cfg, args)
+    if args.ensemble and args.uncertainty:
+        raise SystemExit("--uncertainty is only supported for single-model evaluation.")
     
     # Load data
     print("📊 Loading test data...")
@@ -177,6 +232,12 @@ def main():
         print(f"\n🏆 Test MAE (Seed {args.seed})")
         for mode, value in metrics.items():
             print(f"   MAE_{mode}: {value:.4f}")
+
+        if args.uncertainty:
+            if "multi" not in modes:
+                raise SystemExit("--uncertainty requires --tta multi or --tta all (flip/raw produce unreliable STD).")
+            uncertainty = evaluate_uncertainty(model, test_loader, cfg, device, mode="multi")
+            print(f"   Mean_TTA_Age_STD_{uncertainty['mode']}: {uncertainty['mean_age_std']:.4f}")
 
 
 if __name__ == '__main__':

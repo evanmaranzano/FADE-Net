@@ -157,6 +157,11 @@ class Config:
     num_workers = 4              # 🏎️ Optimized for CPU usage (avoid 100% load)
     early_stopping_patience = 999 # 🛡️ 2027 Strategy: "Trust the Process". Let Cosine Annealing finish its full cycle.
 
+    # TTA batch size: controls chunk size during augmented-view inference.
+    # None = auto (min(total_views, max(batch_size*2, 16))).
+    # Lower this if you hit OOM on small VRAM GPUs (e.g. 8GB).
+    tta_batch_size = None
+
     def __init__(self):
         pass # Attributes are class-level or properties
         
