@@ -314,6 +314,12 @@ def train(args):
     # Updated for Ablation Support: Pass entire config
     model = LightweightAgeEstimator(cfg)
     model.to(cfg.device)
+
+    effective_pretrained = getattr(model.backbone, 'pretrained_loaded', False)
+    if cfg.backbone_pretrained and not effective_pretrained:
+        print("⚠️ CRITICAL: Pretrained weights FAILED to load. Training with random initialization!")
+        print("   Experiment metadata will record effective_pretrained=False")
+    training_metadata['backbone']['effective_pretrained'] = effective_pretrained
     
     # 3. 初始化 EMA
     ema = None
@@ -735,6 +741,13 @@ def train(args):
         f.write(f"Selected_TTA: {selected_tta}\n")
         f.write(f"Selected_Test_MAE: {final_test_mae:.4f}\n")
         f.write(f"Experiment ID: {training_metadata['experiment_id']}\n")
+        f.write(f"Seed: {seed}\n")
+        f.write(f"Split_Protocol: {training_metadata.get('split_protocol', 'N/A')}\n")
+        f.write(f"Split_File: {training_metadata.get('split_file', 'N/A')}\n")
+        f.write(f"Split_Fingerprint: {training_metadata.get('split_fingerprint', 'N/A')}\n")
+        f.write(f"Dataset_Fingerprint: {training_metadata.get('dataset_fingerprint', 'N/A')}\n")
+        f.write(f"Pretrained_Requested: {training_metadata['backbone']['pretrained']}\n")
+        f.write(f"Pretrained_Loaded: {training_metadata['backbone'].get('effective_pretrained', None)}\n")
         
     writer.close()
 

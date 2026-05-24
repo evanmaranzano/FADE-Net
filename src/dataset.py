@@ -183,8 +183,11 @@ def get_stratified_split(
         n = len(indices)
         n_train = int(n * split_ratios[0])
         n_val = int(n * split_ratios[1])
-        # Remaining goes to test (handles rounding errors)
-        
+
+        if n >= 2 and n_val == 0:
+            n_val = 1
+            n_train = max(1, min(n_train, n - 2))
+
         train_indices.extend(indices[:n_train])
         val_indices.extend(indices[n_train : n_train + n_val])
         test_indices.extend(indices[n_train + n_val:])
@@ -245,23 +248,19 @@ class AFADDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        original_idx = idx
-        for attempt in range(3):
-            try:
-                img_path = self.image_paths[idx]
-                age = self.ages[idx]
-                image = Image.open(img_path).convert('RGB')
-                if self.transform:
-                    image = self.transform(image)
-                label_dist = self.dldl_proc.generate_label_distribution(age)
-                return image, label_dist, torch.tensor(age, dtype=torch.float32)
-            except Exception as e:
-                if attempt < 2:
-                    idx = random.randint(0, len(self.image_paths) - 1)
-                else:
-                    import warnings
-                    warnings.warn(f"Failed to load image after 3 attempts: {self.image_paths[original_idx]}: {e}")
-                    return None
+        img_path = f"<index {idx}>"
+        try:
+            img_path = self.image_paths[idx]
+            age = self.ages[idx]
+            image = Image.open(img_path).convert('RGB')
+            if self.transform:
+                image = self.transform(image)
+            label_dist = self.dldl_proc.generate_label_distribution(age)
+            return image, label_dist, torch.tensor(age, dtype=torch.float32)
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Failed to load image {img_path}: {e}")
+            return None
 
 
 

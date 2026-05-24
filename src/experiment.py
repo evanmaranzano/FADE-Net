@@ -46,6 +46,7 @@ def backbone_signature(config) -> dict[str, Any]:
         "source": getattr(config, "backbone_source", "torchvision"),
         "name": getattr(config, "backbone_name", "mobilenet_v3_large"),
         "pretrained": bool(getattr(config, "backbone_pretrained", True)),
+        "effective_pretrained": bool(getattr(config, "backbone_pretrained", True)),
         "msff_feature_indices": _list_value(getattr(config, "msff_feature_indices", (6, 12))),
         "effective_msff_feature_indices": _list_value(
             getattr(config, "effective_msff_feature_indices", getattr(config, "msff_feature_indices", (6, 12)))
@@ -168,6 +169,14 @@ def artifact_path(root_dir: str, kind: str, config, seed: int, extension: str) -
     return os.path.join(root_dir, f"{sanitize_token(kind)}_{experiment_id}{extension}")
 
 
+def _intersection_dict_eq(a: Any, b: Any) -> bool:
+    """Compare two dicts by shared keys only (tolerates new keys added in either direction)."""
+    if not isinstance(a, dict) or not isinstance(b, dict):
+        return a == b
+    shared_keys = set(a) & set(b)
+    return all(a[k] == b[k] for k in shared_keys)
+
+
 def checkpoint_metadata_mismatches(
     checkpoint: dict[str, Any],
     expected_metadata: dict[str, Any],
@@ -198,7 +207,10 @@ def checkpoint_metadata_mismatches(
     for key in keys:
         actual = metadata.get(key)
         expected = expected_metadata.get(key)
-        if actual != expected:
+        if key in ("backbone", "ablations", "loss"):
+            if not _intersection_dict_eq(actual, expected):
+                mismatches.append((key, actual, expected))
+        elif actual != expected:
             mismatches.append((key, actual, expected))
     return mismatches
 

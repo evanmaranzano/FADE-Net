@@ -25,6 +25,7 @@ class BackboneFeatureSpec:
 
 class FeatureBackbone(nn.Module):
     out_channels: int
+    pretrained_loaded: bool = False
 
     def forward_features(self, x, capture_indices=()):
         raise NotImplementedError
@@ -74,12 +75,14 @@ class FeatureBackbone(nn.Module):
 class TorchvisionMobileNetV3Backbone(FeatureBackbone):
     def __init__(self, pretrained: bool = True):
         super().__init__()
+        self.pretrained_loaded = pretrained
         weights = MobileNet_V3_Large_Weights.IMAGENET1K_V2 if pretrained else None
         try:
             self.model = mobilenet_v3_large(weights=weights)
         except (OSError, RuntimeError) as exc:
             if not pretrained:
                 raise
+            self.pretrained_loaded = False
             logger.warning("[Model] Failed to load ImageNet weights (%s); using random MobileNetV3-Large.", exc)
             print(f"[Model] WARNING: Failed to load ImageNet weights ({exc}); using random MobileNetV3-Large.", flush=True)
             self.model = mobilenet_v3_large(weights=None)
@@ -142,11 +145,13 @@ class TimmFeatureBackbone(FeatureBackbone):
             ) from exc
 
         self.model_name = model_name
+        self.pretrained_loaded = pretrained
         try:
             self.model = timm.create_model(model_name, pretrained=pretrained, features_only=True)
         except (OSError, RuntimeError) as exc:
             if not pretrained:
                 raise
+            self.pretrained_loaded = False
             logger.warning("[Model] Failed to load timm pretrained weights (%s); using random %s.", exc, model_name)
             print(f"[Model] WARNING: Failed to load timm pretrained weights ({exc}); using random {model_name}.", flush=True)
             self.model = timm.create_model(model_name, pretrained=False, features_only=True)
