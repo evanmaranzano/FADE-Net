@@ -79,6 +79,43 @@ def amp_step_was_skipped(scale_before, scale_after):
     return scale_after < scale_before
 
 
+def backbone_learning_rate(base_lr, effective_pretrained):
+    return base_lr * 0.1 if effective_pretrained else base_lr
+
+
+def model_needs_aux_outputs(cfg):
+    return bool(getattr(cfg, "use_adaptive_triplet", False) or getattr(cfg, "use_moe", False))
+
+
+def model_forward_for_loss(model, cfg, images):
+    if model_needs_aux_outputs(cfg):
+        return model(images, return_features=True)
+    return model(images), None, None
+
+
+def hard_distillation_start_epoch(total_epochs, default_start=105, tail_epochs=15):
+    return min(default_start, max(0, total_epochs - tail_epochs))
+
+
+class SchedulerStepController:
+    def __init__(self, scheduler, max_epochs):
+        self.scheduler = scheduler
+        self.max_epochs = max_epochs
+        self.pending_steps = 0
+
+    def step_epoch(self, epoch, optimizer_stepped):
+        if epoch >= self.max_epochs:
+            return 0
+        self.pending_steps += 1
+        if not optimizer_stepped:
+            return 0
+        steps = self.pending_steps
+        for _ in range(steps):
+            self.scheduler.step()
+        self.pending_steps = 0
+        return steps
+
+
 # ==========================================
 # CSV Logger
 # ==========================================
@@ -345,22 +382,24 @@ def train(args):
         else:
             head_params.append(param)
 
+    backbone_lr = backbone_learning_rate(cfg.learning_rate, effective_pretrained)
     optimizer = optim.AdamW(
         [
-            {'params': backbone_params, 'lr': cfg.learning_rate * 0.1},   # Backbone: ~3e-5 (cosine -> 3e-6)
-            {'params': head_params, 'lr': cfg.learning_rate}            # Head/Fusion: 3e-4
-        ], 
-        lr=cfg.learning_rate, 
-        weight_decay=cfg.weight_decay 
+            {'params': backbone_params, 'lr': backbone_lr},
+            {'params': head_params, 'lr': cfg.learning_rate}
+        ],
+        lr=cfg.learning_rate,
+        weight_decay=cfg.weight_decay
     )
-    
+
     # ⚡ AMP Scaler
     scaler = make_grad_scaler(cfg.device.type)
-    
+
     # 6. 调度器
     # Accelerated Decay: Reach min_lr at Epoch 100, then stay low for 20 epochs (Stable Phase)
     scheduler = CosineAnnealingLR(optimizer, T_max=100, eta_min=cfg.learning_rate * 0.01)
-    
+    scheduler_controller = SchedulerStepController(scheduler, max_epochs=100)
+
     # --- 断点续训逻辑 ---
     start_epoch = 0
     best_mae = float('inf')
@@ -434,322 +473,321 @@ def train(args):
     print(f"设备: {cfg.device}")
     
     start_time = time.time()
-    
-    # 🌟 [Innovation] Freeze Backbone Strategy
-    # Only train CA modules and Head for the first few epochs
-    freeze_epochs = getattr(cfg, 'freeze_backbone_epochs', 0)
-    if freeze_epochs > 0:
-        if start_epoch < freeze_epochs:
-            print(f"❄️  Freeze Strategy Enabled: Backbone will be frozen for first {freeze_epochs} epochs.")
-            # Freeze all
-            # 1. Freeze Backbone only (Keep Head/Adapters trainable)
-            for param in model.backbone.parameters():
-                param.requires_grad = False
 
-            # 2. Unfreeze CoordAtt modules inside backbone
-            count_unfrozen = 0
-            for name, module in model.backbone.named_modules():
-                if "CoordAtt" in str(type(module)):
-                    for param in module.parameters():
-                        param.requires_grad = True
-                        count_unfrozen += 1
-            
-            print(f"    -> Backbone Frozen. {count_unfrozen} CoordAtt modules inside backbone Unfrozen.")
-            print(f"    -> Head, SPP, and Fusion layers remain trainable.")
-        else:
-            print(f"❄️  Freeze Strategy Skipped: Resume Epoch {start_epoch+1} >= Freeze Limit {freeze_epochs}. Backbone remains unfrozen.")
+    try:
+        # 🌟 [Innovation] Freeze Backbone Strategy
+        # Only train CA modules and Head for the first few epochs
+        freeze_epochs = getattr(cfg, 'freeze_backbone_epochs', 0)
+        if freeze_epochs > 0:
+            if start_epoch < freeze_epochs:
+                print(f"❄️  Freeze Strategy Enabled: Backbone will be frozen for first {freeze_epochs} epochs.")
+                # Freeze all
+                # 1. Freeze Backbone only (Keep Head/Adapters trainable)
+                for param in model.backbone.parameters():
+                    param.requires_grad = False
 
-    # 🛡️ Double Check for Safety
-    first_param = next(model.backbone.parameters())
-    print(f"🔍 检查 Backbone 状态: {'可训练' if first_param.requires_grad else '已冻结'}")
-
-    hard_distillation_applied = False
-    for epoch in range(start_epoch, cfg.epochs):
-        # 🌟 Unfreeze check
-        if freeze_epochs > 0 and epoch == freeze_epochs:
-            print(f"🔥 Unfreezing Backbone at Epoch {epoch+1} (Fine-tuning begins)...")
-            for param in model.parameters():
-                param.requires_grad = True
-            
-            # Optional: Lower LR slightly? Or let cosine scheduler handle it.
-            # Cosine is already decaying, so it's fine.
-
-        # 🌟 [Online Hard Distillation] Disable Regularization at later stages
-        if epoch >= 105:
-            # We use a 'Re-Loader' strategy to ensure worker processes (persistent_workers=True)
-            # strictly receive the updated config and clean transforms on Windows.
-            if not hard_distillation_applied:
-                print(f"🔥 [Epoch {epoch+1}] Hard Distillation Mode: Rebuilding DataLoader to flush persistent workers...")
-                train_loader = apply_hard_distillation_mode(cfg, train_loader, val_loader)
-                hard_distillation_applied = True
-            
-            if cfg.use_sigma_jitter:
-                # Fallback for dynamic safety
-                cfg.use_sigma_jitter = False
-
-        # --- 1. 训练 ---
-        model.train()
-        train_loss = 0.0
-        train_mae_sum = 0.0
-        train_samples = 0
-        train_batches = 0
-        optimizer_stepped = False
-        train_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0, "triplet": 0.0, "asym": 0.0, "moe_gate": 0.0}
-        
-        print(f"\nEpoch [{epoch+1}/{cfg.epochs}] Training (LR: {optimizer.param_groups[0]['lr']:.1e})...")
-        
-        for batch_idx, (images, target_dists, true_ages) in enumerate(train_loader):
-            if images.numel() == 0:
-                print(f"⚠️ Skipping empty training batch at index {batch_idx}")
-                continue
-
-            images = images.to(cfg.device)
-            target_dists = target_dists.to(cfg.device)
-            true_ages = true_ages.to(cfg.device)
-            
-            # MixUp
-            if cfg.use_mixup and np.random.random() < cfg.mixup_prob:
-                images, target_dists, true_ages = mixup_data(
-                    images, target_dists, true_ages, alpha=cfg.mixup_alpha
-                )
-            
-            optimizer.zero_grad()
-            
-            # ⚡ AMP Forward
-            with make_amp_context(cfg.device.type):
-                logits, embeddings, extras = model(images, return_features=True)
-                log_probs = F.log_softmax(logits, dim=1)
+                # 2. Unfreeze CoordAtt modules inside backbone
+                count_unfrozen = 0
+                for name, module in model.backbone.named_modules():
+                    if "CoordAtt" in str(type(module)):
+                        for param in module.parameters():
+                            param.requires_grad = True
+                            count_unfrozen += 1
                 
-                # 计算 Combined Loss
-                loss, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate = criterion(
-                    log_probs, target_dists, true_ages, logits, embeddings=embeddings, extras=extras
-                )
-            
-            # ⚡ AMP Backward
-            scaler.scale(loss).backward()
-            
-            # Unscale before clipping
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                print(f"    -> Backbone Frozen. {count_unfrozen} CoordAtt modules inside backbone Unfrozen.")
+                print(f"    -> Head, SPP, and Fusion layers remain trainable.")
+            else:
+                print(f"❄️  Freeze Strategy Skipped: Resume Epoch {start_epoch+1} >= Freeze Limit {freeze_epochs}. Backbone remains unfrozen.")
 
-            scale_before = scaler.get_scale()
-            scaler.step(optimizer)
-            scaler.update()
-            step_skipped = amp_step_was_skipped(scale_before, scaler.get_scale())
-            optimizer_stepped = optimizer_stepped or not step_skipped
-            
-            # 更新 EMA
-            if ema and not step_skipped:
-                ema.update()
+        # 🛡️ Double Check for Safety
+        first_param = next(model.backbone.parameters())
+        print(f"🔍 检查 Backbone 状态: {'可训练' if first_param.requires_grad else '已冻结'}")
+
+        hard_distill_start = hard_distillation_start_epoch(cfg.epochs)
+        hard_distillation_applied = False
+        for epoch in range(start_epoch, cfg.epochs):
+            # 🌟 Unfreeze check
+            if freeze_epochs > 0 and epoch == freeze_epochs:
+                print(f"🔥 Unfreezing Backbone at Epoch {epoch+1} (Fine-tuning begins)...")
+                for param in model.parameters():
+                    param.requires_grad = True
                 
-            loss_value = loss.item()
-            train_loss += loss_value
-            train_batches += 1
-            _accumulate_loss_components(train_loss_sums, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate)
-            
-            # 计算 MAE (Monitor)
-            with torch.no_grad():
-                probs = F.softmax(logits, dim=1)
-                pred_ages = dldl_tools.expectation_regression(probs)
-                train_mae_sum += torch.sum(torch.abs(pred_ages - true_ages)).item()
-                train_samples += true_ages.size(0)
-            
-            if (batch_idx + 1) % 100 == 0:
-                print(
-                    f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss_value:.4f} "
-                    f"(KL={loss_kl:.3f}, L1={loss_l1:.3f}, Rank={loss_rank:.3f}, "
-                    f"MV={loss_mv:.3f}, Triplet={loss_triplet:.3f}, Asym={loss_asym:.3f}, MoE={loss_moe_gate:.3f})"
-                )
-            
-            if batch_idx % 10 == 0:
-                batch_logger.log([epoch + 1, batch_idx, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate])
+                # Optional: Lower LR slightly? Or let cosine scheduler handle it.
+                # Cosine is already decaying, so it's fine.
+
+            # 🌟 [Online Hard Distillation] Disable Regularization at later stages
+            if epoch >= hard_distill_start:
+                # We use a 'Re-Loader' strategy to ensure worker processes (persistent_workers=True)
+                # strictly receive the updated config and clean transforms on Windows.
+                if not hard_distillation_applied:
+                    print(f"🔥 [Epoch {epoch+1}] Hard Distillation Mode: Rebuilding DataLoader to flush persistent workers...")
+                    train_loader = apply_hard_distillation_mode(cfg, train_loader, val_loader)
+                    hard_distillation_applied = True
                 
-                # 📈 TensorBoard Logging (Step)
-                global_step = epoch * len(train_loader) + batch_idx
-                writer.add_scalar('Train/Loss_Total', loss_value, global_step)
-                writer.add_scalar('Train/Loss_KL', loss_kl, global_step)
-                writer.add_scalar('Train/Loss_L1', loss_l1, global_step)
-                writer.add_scalar('Train/Loss_Rank', loss_rank, global_step)
-                writer.add_scalar('Train/Loss_MV', loss_mv, global_step)
-                writer.add_scalar('Train/Loss_Triplet', loss_triplet, global_step)
-                writer.add_scalar('Train/Loss_Asym', loss_asym, global_step)
-                writer.add_scalar('Train/Loss_MoE_Gate', loss_moe_gate, global_step)
-                writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], global_step)
+                if cfg.use_sigma_jitter:
+                    # Fallback for dynamic safety
+                    cfg.use_sigma_jitter = False
 
-            if max_train_batches is not None and train_batches >= max_train_batches:
-                print(f"🧪 Reached max_train_batches={max_train_batches}; ending training loop for this epoch.")
-                break
+            # --- 1. 训练 ---
+            model.train()
+            train_loss = 0.0
+            train_mae_sum = 0.0
+            train_samples = 0
+            train_batches = 0
+            optimizer_stepped = False
+            train_loss_sums = {"total": 0.0, "kl": 0.0, "l1": 0.0, "rank": 0.0, "mv": 0.0, "triplet": 0.0, "asym": 0.0, "moe_gate": 0.0}
             
-        if train_samples == 0:
-            raise RuntimeError("No valid training samples were loaded in this epoch.")
-
-        avg_train_loss = train_loss / train_batches
-        avg_train_components = _average_loss_sums(train_loss_sums, train_batches)
-        avg_train_mae = train_mae_sum / train_samples
-        
-        # --- 2. 验证 (Validation) ---
-        # 如果使用了 EMA，验证时应该使用 EMA 的权重
-        if ema:
-            ema.apply_shadow()
-            print("🛡️切换到 EMA 权重进行验证...")
+            print(f"\nEpoch [{epoch+1}/{cfg.epochs}] Training (LR: {optimizer.param_groups[0]['lr']:.1e})...")
             
-        model.eval()
-        mae_sum = 0.0
-        total_samples = 0
-        val_batches = 0
-        
-        with torch.no_grad():
-            for images, target_dists, true_ages in val_loader:
+            for batch_idx, (images, target_dists, true_ages) in enumerate(train_loader):
                 if images.numel() == 0:
-                    print("⚠️ Skipping empty validation batch")
+                    print(f"⚠️ Skipping empty training batch at index {batch_idx}")
                     continue
 
                 images = images.to(cfg.device)
                 target_dists = target_dists.to(cfg.device)
                 true_ages = true_ages.to(cfg.device)
                 
-                # Selection metric: multi-scale TTA MAE only.
-                probs = predict_probs(model, images, mode="multi", base_size=cfg.img_size)
-                pred_ages = probs_to_ages(probs, cfg.num_classes)
-                mae_sum += torch.sum(torch.abs(pred_ages - true_ages)).item()
-                total_samples += true_ages.size(0)
-                val_batches += 1
+                # MixUp
+                if cfg.use_mixup and np.random.random() < cfg.mixup_prob:
+                    images, target_dists, true_ages = mixup_data(
+                        images, target_dists, true_ages, alpha=cfg.mixup_alpha
+                    )
+                
+                optimizer.zero_grad()
+                
+                # ⚡ AMP Forward
+                with make_amp_context(cfg.device.type):
+                    logits, embeddings, extras = model_forward_for_loss(model, cfg, images)
+                    log_probs = F.log_softmax(logits, dim=1)
+                    
+                    # 计算 Combined Loss
+                    loss, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate = criterion(
+                        log_probs, target_dists, true_ages, logits, embeddings=embeddings, extras=extras
+                    )
+                
+                # ⚡ AMP Backward
+                scaler.scale(loss).backward()
+                
+                # Unscale before clipping
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
 
-                if max_val_batches is not None and val_batches >= max_val_batches:
-                    print(f"🧪 Reached max_val_batches={max_val_batches}; ending validation loop.")
+                scale_before = scaler.get_scale()
+                scaler.step(optimizer)
+                scaler.update()
+                step_skipped = amp_step_was_skipped(scale_before, scaler.get_scale())
+                optimizer_stepped = optimizer_stepped or not step_skipped
+                
+                # 更新 EMA
+                if ema and not step_skipped:
+                    ema.update()
+                    
+                loss_value = loss.item()
+                train_loss += loss_value
+                train_batches += 1
+                _accumulate_loss_components(train_loss_sums, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate)
+                
+                # 计算 MAE (Monitor)
+                with torch.no_grad():
+                    probs = F.softmax(logits, dim=1)
+                    pred_ages = dldl_tools.expectation_regression(probs)
+                    train_mae_sum += torch.sum(torch.abs(pred_ages - true_ages)).item()
+                    train_samples += true_ages.size(0)
+                
+                if (batch_idx + 1) % 100 == 0:
+                    print(
+                        f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss_value:.4f} "
+                        f"(KL={loss_kl:.3f}, L1={loss_l1:.3f}, Rank={loss_rank:.3f}, "
+                        f"MV={loss_mv:.3f}, Triplet={loss_triplet:.3f}, Asym={loss_asym:.3f}, MoE={loss_moe_gate:.3f})"
+                    )
+                
+                if batch_idx % 10 == 0:
+                    batch_logger.log([epoch + 1, batch_idx, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate])
+                    
+                    # 📈 TensorBoard Logging (Step)
+                    global_step = epoch * len(train_loader) + batch_idx
+                    writer.add_scalar('Train/Loss_Total', loss_value, global_step)
+                    writer.add_scalar('Train/Loss_KL', loss_kl, global_step)
+                    writer.add_scalar('Train/Loss_L1', loss_l1, global_step)
+                    writer.add_scalar('Train/Loss_Rank', loss_rank, global_step)
+                    writer.add_scalar('Train/Loss_MV', loss_mv, global_step)
+                    writer.add_scalar('Train/Loss_Triplet', loss_triplet, global_step)
+                    writer.add_scalar('Train/Loss_Asym', loss_asym, global_step)
+                    writer.add_scalar('Train/Loss_MoE_Gate', loss_moe_gate, global_step)
+                    writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], global_step)
+
+                if max_train_batches is not None and train_batches >= max_train_batches:
+                    print(f"🧪 Reached max_train_batches={max_train_batches}; ending training loop for this epoch.")
                     break
-        
-        # 验证结束，如果用了 EMA，恢复原始权重以便继续训练
-        if ema:
-            ema.restore()
-            print("🛡️恢复原始权重继续训练...")
-            
-        if total_samples == 0:
-            raise RuntimeError("No valid validation samples were loaded.")
+                
+            if train_samples == 0:
+                raise RuntimeError("No valid training samples were loaded in this epoch.")
 
-        val_mae = mae_sum / total_samples
-        
-        print(f"Epoch [{epoch+1}/{cfg.epochs}] | "
-              f"T_Loss: {avg_train_loss:.4f} | T_Mixup_MAE: {avg_train_mae:.2f} | "
-              f"V_MAE: {val_mae:.2f}")
-
-        # --- 3. 保存最佳模型 ---
-        is_best = False
-        if val_mae < best_mae:
-            print(f"🏆 新纪录！MAE {best_mae:.2f} -> {val_mae:.2f}")
-            best_mae = val_mae
-            is_best = True
+            avg_train_loss = train_loss / train_batches
+            avg_train_components = _average_loss_sums(train_loss_sums, train_batches)
+            avg_train_mae = train_mae_sum / train_samples
             
-            # 如果用了 EMA，保存 EMA 后的权重为 best_model.pth
+            # --- 2. 验证 (Validation) ---
+            # 如果使用了 EMA，验证时应该使用 EMA 的权重
             if ema:
                 ema.apply_shadow()
-                save_model_package(model, best_model_path, training_metadata)
-                ema.restore()
-            else:
-                save_model_package(model, best_model_path, training_metadata)
+                print("🛡️切换到 EMA 权重进行验证...")
                 
-        # Logging
-        current_lr = optimizer.param_groups[0]['lr']
-        elapsed = time.time() - start_time
-        epoch_logger.log([
-            epoch + 1,
-            avg_train_loss,
-            avg_train_components["kl"],
-            avg_train_components["l1"],
-            avg_train_components["rank"],
-            avg_train_components["mv"],
-            avg_train_components["triplet"],
-            avg_train_components["asym"],
-            avg_train_components["moe_gate"],
-            avg_train_mae,
-            val_mae,
-            current_lr,
-            elapsed,
-            int(is_best),
-        ])
-        
-        # 📈 TensorBoard Logging (Epoch)
-        writer.add_scalar('Epoch/Train_Loss', avg_train_loss, epoch + 1)
-        writer.add_scalar('Epoch/Train_KL_Loss', avg_train_components["kl"], epoch + 1)
-        writer.add_scalar('Epoch/Train_L1_Loss', avg_train_components["l1"], epoch + 1)
-        writer.add_scalar('Epoch/Train_Rank_Loss', avg_train_components["rank"], epoch + 1)
-        writer.add_scalar('Epoch/Train_MV_Loss', avg_train_components["mv"], epoch + 1)
-        writer.add_scalar('Epoch/Train_Triplet_Loss', avg_train_components["triplet"], epoch + 1)
-        writer.add_scalar('Epoch/Train_Asym_Loss', avg_train_components["asym"], epoch + 1)
-        writer.add_scalar('Epoch/Train_MoE_Gate_Loss', avg_train_components["moe_gate"], epoch + 1)
-        writer.add_scalar('Epoch/Train_Mixup_MAE', avg_train_mae, epoch + 1)
-        writer.add_scalar('Epoch/Val_MAE', val_mae, epoch + 1)
-        
-        if epoch < 100 and optimizer_stepped:
-            scheduler.step()
-        elif epoch < 100:
-            print("⚠️ Scheduler step skipped because AMP skipped all optimizer steps this epoch.")
-        else:
-             # Maintain eta_min for Stable Phase (101-120)
-             pass
-        
-        # 保存断点
-        checkpoint_dict = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(), 
-            'best_mae': best_mae,
-            'metadata': training_metadata,
-        }
-        if ema:
-            checkpoint_dict['ema_state_dict'] = ema.shadow
+            model.eval()
+            mae_sum = 0.0
+            total_samples = 0
+            val_batches = 0
             
-        save_checkpoint(checkpoint_dict, filename=checkpoint_path)
-        
-        # --- Manual SWA Strategy ---
-        # Save checkpoints for the last 10 epochs
-        if epoch >= cfg.epochs - 10:
-            swa_filename = artifact_path(ROOT_DIR, f"checkpoint_epoch_{epoch+1}", cfg, seed, ".pth")
-            print(f"💾 Saving SWA Checkpoint: {swa_filename}")
-            save_checkpoint(checkpoint_dict, filename=swa_filename)
-    
+            with torch.no_grad():
+                for images, target_dists, true_ages in val_loader:
+                    if images.numel() == 0:
+                        print("⚠️ Skipping empty validation batch")
+                        continue
 
-    # ==========================================
-    # 🏁 Final Test Set Evaluation
-    # ==========================================
-    print("\n" + "="*50)
-    print("🏁 Final Evaluation on TEST SET")
-    print("="*50)
-    
-    # Load Best Model
-    if os.path.exists(best_model_path):
-        state_dict, checkpoint = load_model_state_package(best_model_path, cfg.device)
-        mismatches = checkpoint_metadata_mismatches(checkpoint, training_metadata)
-        if mismatches:
-            raise RuntimeError(f"Best model metadata mismatch; refusing final evaluation. {_format_metadata_mismatches(mismatches)}")
-        model.load_state_dict(state_dict)
-        print(f"📂 Loaded Best Model from {best_model_path}")
-    
-    test_metrics = evaluate_mae(model, test_loader, cfg, cfg.device, modes=TTA_MODES, max_batches=max_test_batches)
-    selected_tta = training_metadata["selection_metric"]["tta"]
-    final_test_mae = test_metrics[selected_tta]
-    print(f"🏆 Final Test MAE ({selected_tta}): {final_test_mae:.4f}")
-    for mode in TTA_MODES:
-        print(f"   MAE_{mode}: {test_metrics[mode]:.4f}")
-    
-    # Save Final Result
-    with open(final_result_path, "w") as f:
-        f.write(f"MAE_raw: {test_metrics['raw']:.4f}\n")
-        f.write(f"MAE_flip: {test_metrics['flip']:.4f}\n")
-        f.write(f"MAE_multi: {test_metrics['multi']:.4f}\n")
-        f.write(f"Selected_TTA: {selected_tta}\n")
-        f.write(f"Selected_Test_MAE: {final_test_mae:.4f}\n")
-        f.write(f"Experiment ID: {training_metadata['experiment_id']}\n")
-        f.write(f"Seed: {seed}\n")
-        f.write(f"Split_Protocol: {training_metadata.get('split_protocol', 'N/A')}\n")
-        f.write(f"Split_File: {training_metadata.get('split_file', 'N/A')}\n")
-        f.write(f"Split_Fingerprint: {training_metadata.get('split_fingerprint', 'N/A')}\n")
-        f.write(f"Dataset_Fingerprint: {training_metadata.get('dataset_fingerprint', 'N/A')}\n")
-        f.write(f"Pretrained_Requested: {training_metadata['backbone']['pretrained']}\n")
-        f.write(f"Pretrained_Loaded: {training_metadata['backbone'].get('effective_pretrained', None)}\n")
+                    images = images.to(cfg.device)
+                    target_dists = target_dists.to(cfg.device)
+                    true_ages = true_ages.to(cfg.device)
+                    
+                    # Selection metric: multi-scale TTA MAE only.
+                    probs = predict_probs(model, images, mode="multi", base_size=cfg.img_size)
+                    pred_ages = probs_to_ages(probs, cfg.num_classes)
+                    mae_sum += torch.sum(torch.abs(pred_ages - true_ages)).item()
+                    total_samples += true_ages.size(0)
+                    val_batches += 1
+
+                    if max_val_batches is not None and val_batches >= max_val_batches:
+                        print(f"🧪 Reached max_val_batches={max_val_batches}; ending validation loop.")
+                        break
+            
+            # 验证结束，如果用了 EMA，恢复原始权重以便继续训练
+            if ema:
+                ema.restore()
+                print("🛡️恢复原始权重继续训练...")
+                
+            if total_samples == 0:
+                raise RuntimeError("No valid validation samples were loaded.")
+
+            val_mae = mae_sum / total_samples
+            
+            print(f"Epoch [{epoch+1}/{cfg.epochs}] | "
+                  f"T_Loss: {avg_train_loss:.4f} | T_Mixup_MAE: {avg_train_mae:.2f} | "
+                  f"V_MAE: {val_mae:.2f}")
+
+            # --- 3. 保存最佳模型 ---
+            is_best = False
+            if val_mae < best_mae:
+                print(f"🏆 新纪录！MAE {best_mae:.2f} -> {val_mae:.2f}")
+                best_mae = val_mae
+                is_best = True
+                
+                # 如果用了 EMA，保存 EMA 后的权重为 best_model.pth
+                if ema:
+                    ema.apply_shadow()
+                    save_model_package(model, best_model_path, training_metadata)
+                    ema.restore()
+                else:
+                    save_model_package(model, best_model_path, training_metadata)
+                    
+            # Logging
+            current_lr = optimizer.param_groups[0]['lr']
+            elapsed = time.time() - start_time
+            epoch_logger.log([
+                epoch + 1,
+                avg_train_loss,
+                avg_train_components["kl"],
+                avg_train_components["l1"],
+                avg_train_components["rank"],
+                avg_train_components["mv"],
+                avg_train_components["triplet"],
+                avg_train_components["asym"],
+                avg_train_components["moe_gate"],
+                avg_train_mae,
+                val_mae,
+                current_lr,
+                elapsed,
+                int(is_best),
+            ])
+            
+            # 📈 TensorBoard Logging (Epoch)
+            writer.add_scalar('Epoch/Train_Loss', avg_train_loss, epoch + 1)
+            writer.add_scalar('Epoch/Train_KL_Loss', avg_train_components["kl"], epoch + 1)
+            writer.add_scalar('Epoch/Train_L1_Loss', avg_train_components["l1"], epoch + 1)
+            writer.add_scalar('Epoch/Train_Rank_Loss', avg_train_components["rank"], epoch + 1)
+            writer.add_scalar('Epoch/Train_MV_Loss', avg_train_components["mv"], epoch + 1)
+            writer.add_scalar('Epoch/Train_Triplet_Loss', avg_train_components["triplet"], epoch + 1)
+            writer.add_scalar('Epoch/Train_Asym_Loss', avg_train_components["asym"], epoch + 1)
+            writer.add_scalar('Epoch/Train_MoE_Gate_Loss', avg_train_components["moe_gate"], epoch + 1)
+            writer.add_scalar('Epoch/Train_Mixup_MAE', avg_train_mae, epoch + 1)
+            writer.add_scalar('Epoch/Val_MAE', val_mae, epoch + 1)
+            
+            scheduler_steps = scheduler_controller.step_epoch(epoch, optimizer_stepped)
+            if epoch < scheduler_controller.max_epochs and scheduler_steps == 0:
+                print("⚠️ Scheduler step deferred because AMP skipped all optimizer steps this epoch.")
+            
+            # 保存断点
+            checkpoint_dict = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(), 
+                'best_mae': best_mae,
+                'metadata': training_metadata,
+            }
+            if ema:
+                checkpoint_dict['ema_state_dict'] = ema.shadow
+                
+            save_checkpoint(checkpoint_dict, filename=checkpoint_path)
+            
+            # --- Manual SWA Strategy ---
+            # Save checkpoints for the last 10 epochs
+            if epoch >= cfg.epochs - 10:
+                swa_filename = artifact_path(ROOT_DIR, f"checkpoint_epoch_{epoch+1}", cfg, seed, ".pth")
+                print(f"💾 Saving SWA Checkpoint: {swa_filename}")
+                save_checkpoint(checkpoint_dict, filename=swa_filename)
         
-    writer.close()
+
+        # ==========================================
+        # 🏁 Final Test Set Evaluation
+        # ==========================================
+        print("\n" + "="*50)
+        print("🏁 Final Evaluation on TEST SET")
+        print("="*50)
+        
+        # Load Best Model
+        if os.path.exists(best_model_path):
+            state_dict, checkpoint = load_model_state_package(best_model_path, cfg.device)
+            mismatches = checkpoint_metadata_mismatches(checkpoint, training_metadata)
+            if mismatches:
+                raise RuntimeError(f"Best model metadata mismatch; refusing final evaluation. {_format_metadata_mismatches(mismatches)}")
+            model.load_state_dict(state_dict)
+            print(f"📂 Loaded Best Model from {best_model_path}")
+        
+        test_metrics = evaluate_mae(model, test_loader, cfg, cfg.device, modes=TTA_MODES, max_batches=max_test_batches)
+        selected_tta = training_metadata["selection_metric"]["tta"]
+        final_test_mae = test_metrics[selected_tta]
+        print(f"🏆 Final Test MAE ({selected_tta}): {final_test_mae:.4f}")
+        for mode in TTA_MODES:
+            print(f"   MAE_{mode}: {test_metrics[mode]:.4f}")
+        
+        # Save Final Result
+        with open(final_result_path, "w") as f:
+            f.write(f"MAE_raw: {test_metrics['raw']:.4f}\n")
+            f.write(f"MAE_flip: {test_metrics['flip']:.4f}\n")
+            f.write(f"MAE_multi: {test_metrics['multi']:.4f}\n")
+            f.write(f"Selected_TTA: {selected_tta}\n")
+            f.write(f"Selected_Test_MAE: {final_test_mae:.4f}\n")
+            f.write(f"Experiment ID: {training_metadata['experiment_id']}\n")
+            f.write(f"Seed: {seed}\n")
+            f.write(f"Split_Protocol: {training_metadata.get('split_protocol', 'N/A')}\n")
+            f.write(f"Split_File: {training_metadata.get('split_file', 'N/A')}\n")
+            f.write(f"Split_Fingerprint: {training_metadata.get('split_fingerprint', 'N/A')}\n")
+            f.write(f"Dataset_Fingerprint: {training_metadata.get('dataset_fingerprint', 'N/A')}\n")
+            f.write(f"Pretrained_Requested: {training_metadata['backbone']['pretrained']}\n")
+            f.write(f"Pretrained_Loaded: {training_metadata['backbone'].get('effective_pretrained', None)}\n")
+            
+    finally:
+        writer.close()
 
 if __name__ == "__main__":
     import sys
