@@ -251,19 +251,29 @@ class AFADDataset(Dataset):
         return len(self.image_paths)
 
     def __getitem__(self, idx):
-        img_path = f"<index {idx}>"
-        try:
-            img_path = self.image_paths[idx]
-            age = self.ages[idx]
-            image = Image.open(img_path).convert('RGB')
-            if self.transform:
-                image = self.transform(image)
-            label_dist = self.dldl_proc.generate_label_distribution(age)
-            return image, label_dist, torch.tensor(age, dtype=torch.float32)
-        except Exception as e:
-            import warnings
-            warnings.warn(f"Failed to load image {img_path}: {e}")
+        import warnings
+
+        if len(self.image_paths) == 0:
+            warnings.warn("Failed to load image from empty AFAD dataset")
             return None
+
+        for attempt in range(3):
+            attempt_idx = idx if attempt == 0 else random.randrange(len(self.image_paths))
+            img_path = f"<index {attempt_idx}>"
+            try:
+                img_path = self.image_paths[attempt_idx]
+                age = self.ages[attempt_idx]
+                image = Image.open(img_path).convert('RGB')
+                if self.transform:
+                    image = self.transform(image)
+                label_dist = self.dldl_proc.generate_label_distribution(age)
+                return image, label_dist, torch.tensor(age, dtype=torch.float32)
+            except Exception as e:
+                last_error = e
+                last_path = img_path
+
+        warnings.warn(f"Failed to load image {last_path}: {last_error}")
+        return None
 
 
 

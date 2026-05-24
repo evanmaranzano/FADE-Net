@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from PIL import Image
 from torch.utils.data import Dataset
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -10,7 +11,8 @@ SRC_DIR = ROOT_DIR / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 from config import Config
-from dataset import get_stratified_split
+import dataset as dataset_module
+from dataset import AFADDataset, get_stratified_split, my_collate_fn
 from utils import CombinedLoss, DLDLProcessor, EMAModel
 
 
@@ -94,3 +96,59 @@ def test_asymmetric_ordinal_reports_l1_contribution_not_raw_l1():
     result = criterion(log_probs, target_dists, true_ages, logits)
 
     assert result[2] == 0.0
+
+
+def _afad_root_with_images(tmp_path, *images):
+    image_dir = tmp_path / "10" / "111"
+    image_dir.mkdir(parents=True)
+    for name, good in images:
+        path = image_dir / name
+        if good:
+            Image.new("RGB", (2, 2), color=(255, 0, 0)).save(path)
+        else:
+            path.write_bytes(b"not an image")
+    return tmp_path
+
+
+def test_afad_dataset_retries_random_fallback_after_failed_image(monkeypatch, tmp_path):
+    root = _afad_root_with_images(tmp_path, ("bad.jpg", False), ("good.jpg", True))
+    cfg = _cfg(min_age=0, max_age=100, num_classes=101, use_dldl_v2=False)
+    dataset = AFADDataset(str(root), transform=lambda image: torch.ones(1), config=cfg)
+    monkeypatch.setattr(dataset_module.random, "randrange", lambda size: 1)
+
+    image, label_dist, age = dataset[0]
+
+    assert torch.equal(image, torch.ones(1))
+    assert torch.isclose(label_dist.sum(), torch.tensor(1.0), atol=1e-6)
+    assert age.item() == 10.0
+
+
+def test_afad_dataset_returns_none_after_bounded_failed_fallbacks(monkeypatch, tmp_path):
+    root = _afad_root_with_images(tmp_path, ("bad_a.jpg", False), ("bad_b.jpg", False))
+    cfg = _cfg(min_age=0, max_age=100, num_classes=101, use_dldl_v2=False)
+    dataset = AFADDataset(str(root), transform=lambda image: torch.ones(1), config=cfg)
+    fallback_sizes = []
+
+    def fallback_index(size):
+        fallback_sizes.append(size)
+        return 1
+
+    monkeypatch.setattr(dataset_module.random, "randrange", fallback_index)
+
+    with pytest.warns(UserWarning, match="Failed to load image"):
+        assert dataset[0] is None
+    assert fallback_sizes == [2, 2]
+
+
+def test_collate_filters_none_and_handles_all_empty_batches():
+    sample = (torch.ones(1), torch.ones(3), torch.tensor(10.0))
+
+    images, labels, ages = my_collate_fn([None, sample])
+    empty_images, empty_labels, empty_ages = my_collate_fn([None, None])
+
+    assert images.shape == (1, 1)
+    assert labels.shape == (1, 3)
+    assert ages.shape == (1,)
+    assert empty_images.numel() == 0
+    assert empty_labels.numel() == 0
+    assert empty_ages.numel() == 0
