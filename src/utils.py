@@ -77,8 +77,11 @@ class DLDLProcessor:
             
         # Apply Jitter (add offset)
         sigma = sigma + sigma_offset
-        # Ensure sigma doesn't go too low (e.g. < 0.5)
-        sigma = max(sigma, 0.5)
+        if not isinstance(sigma, torch.Tensor):
+            sigma = torch.tensor(sigma, dtype=age_scalar.dtype, device=age_scalar.device)
+        else:
+            sigma = sigma.to(dtype=age_scalar.dtype, device=age_scalar.device)
+        sigma = torch.clamp(sigma, min=0.5)
 
         # 计算每个年龄节点 j 与 真实年龄 y 的差异
         # $$P(j|x) \propto e^{-\frac{(j-y)^2}{2\sigma^2}}$$
@@ -119,22 +122,23 @@ class EMAModel:
 
     def register(self):
         for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
+            self.shadow[name] = param.data.clone()
 
     def update(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if name not in self.shadow:
-                    self.shadow[name] = param.data.clone()
+                    raise KeyError(f"EMA update: {name} not in shadow. Was register() called?")
                 new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
                 self.shadow[name] = new_average.clone()
 
     def apply_shadow(self):
+        if self.backup:
+            raise RuntimeError("EMA apply_shadow() called before restore().")
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 if name not in self.shadow:
-                    self.shadow[name] = param.data.clone()
+                    raise KeyError(f"EMA apply_shadow: {name} not in shadow. Was register() called?")
                 self.backup[name] = param.data
                 param.data = self.shadow[name]
 
@@ -190,65 +194,6 @@ class OrderRegressionLoss(nn.Module):
         true_ages: [B] (Not used if target_dists is provided)
         target_dists: [B, K] (Optional, used for Mixup/DLDL)
         """
-        # Ordinal Regression label encoding
-        # Example: Age 3, K=5. Label=[1, 1, 1, 0, 0]
-        # P(y > k) should be 1 if true_age > k
-        
-        # true_ages: [B, 1]
-        t_ages = true_ages.unsqueeze(1)
-        
-        # Binary Targets: [B, K]
-        # rank_indices is [1, K]
-        # target[i, k] = 1 if true_age[i] > k else 0
-        targets = (t_ages > self.rank_indices).float()
-        
-        # 我们希望 Logits 能够反映这种 binary 概率
-        # 但 Model 输出的是 Softmax Logits，并不直接对应 Binary Classifiers
-        # 这里使用一种 Proxy： Cumulative Sum of Softmax? No.
-        
-        # 更好的 Ranking Loss (Niu et al. CVPR 2016) 需要模型输出 2K 个值的 Binary Logits
-        # 这里我们的模型是标准的 Softmax Multi-class
-        # 所以我们改用: "Soft Softmax Ranking" 
-        # 惩罚: 如果 P(k) 高，那么 P(k-1) around it 也应该合理，
-        # 更直接的是：直接惩罚 Expectation 的 L1 (已经在 CombinedLoss 里了)
-        
-        # ---- 修正方案 ----
-        # 鉴于只修改 Loss 不改模型结构 (Model 输出 output=num_classes)
-        # 我们使用 "Expectation Ranking" 无需额外 Loss，L1 已经做了。
-        # 这里如果一定要加 Rank Loss，通常是指 Pairwise Ranking
-        # 随机抽取 Pairs (i, j)，如果 age_i > age_j，则 expectation_i > expectation_j + margin
-        
-        preds_age = torch.sum(F.softmax(logits, dim=1) * self.rank_indices, dim=1)
-        
-        # Pairwise Ranking
-        n = preds_age.size(0)
-        # 随机采样一些 pairs (为了效率，不全量)
-        # 也可以简单的: Shuffle and Compare
-        idx = torch.randperm(n).to(logits.device)
-        preds_shuffled = preds_age[idx]
-        ages_shuffled = true_ages[idx]
-        
-        # diff truth
-        diff_truth = true_ages - ages_shuffled
-        # diff pred
-        diff_pred = preds_age - preds_shuffled
-        
-        # 如果 truthA > truthB (diff > 0), hope predA > predB (diff > 0)
-        # Loss = ReLU( - sign(diff_truth) * diff_pred ) ?
-        # 简单点: Sign Consistency
-        # Loss = max(0, - sign(diff_truth) * diff_pred + margin)? 
-        # No, for regression, L1 is optimal. 
-        
-        # 回归到原论文思想 (DLDL + Ranking?)
-        # 这里的 Rank Loss 如果是 "Auxiliary"，通常是指 Dr. DLDL 提到的
-        # "K-1 Binary Classifiers" (需要修改模型最后一层)
-        
-        # 既然我们不想改模型结构，我们保留这个 Placeholder 为 L1 Loss 的增强版
-        # 或者使用 "Distribution Cumulative Loss" -> CDF Loss
-        # Minimize KL between CDFs (Cumulative Distribution Functions)
-        # Earth Mover's Distance (EMD) 近似
-        
-        # CDF Calculation
         probs = F.softmax(logits, dim=1)
         cdf_pred = torch.cumsum(probs, dim=1)
         
@@ -456,12 +401,6 @@ class CombinedLoss(nn.Module):
         self.max_age = getattr(config, 'max_age', 80)
         self.num_classes = getattr(config, 'num_classes', self.max_age - self.min_age + 1)
 
-    @staticmethod
-    def _scalar(value, device):
-        if isinstance(value, torch.Tensor):
-            return value
-        return torch.tensor(float(value), device=device)
-
     def _moe_gate_targets(self, target_dists, device):
         class_ids = torch.arange(self.num_classes, device=device)
         bin_ids = torch.div(class_ids * self.num_moe_experts, self.num_classes, rounding_mode='floor')
@@ -544,11 +483,12 @@ class CombinedLoss(nn.Module):
         # 总损失
         l1_term = 0.0 if self.use_asymmetric_ordinal else self.lambda_l1 * l1
         total_loss = w_kl + l1_term + term_rank + term_mv + term_triplet + term_asym + term_moe_gate
+        logged_l1 = l1_term if isinstance(l1_term, torch.Tensor) else torch.tensor(l1_term, device=log_probs.device)
         # Return 8-tuple: (total, kl, l1, rank, mv, triplet, asym, moe_gate)
         return (
             total_loss,
             w_kl.detach().item(),
-            l1.detach().item(),
+            logged_l1.detach().item(),
             rank_loss.detach().item(),
             loss_mv.detach().item(),
             loss_triplet.detach().item(),

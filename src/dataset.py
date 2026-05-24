@@ -184,9 +184,12 @@ def get_stratified_split(
         n_train = int(n * split_ratios[0])
         n_val = int(n * split_ratios[1])
 
-        if n >= 2 and n_val == 0:
+        if n >= 3 and split_ratios[1] > 0 and n_val == 0:
             n_val = 1
-            n_train = max(1, min(n_train, n - 2))
+        if n >= 2:
+            n_train = max(1, min(n_train, n - n_val - 1))
+        else:
+            n_train = n
 
         train_indices.extend(indices[:n_train])
         val_indices.extend(indices[n_train : n_train + n_val])
