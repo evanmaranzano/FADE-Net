@@ -128,38 +128,38 @@ def mae_from_probs(probs, ages, num_classes: int) -> float:
 def evaluate_mae(model, loader, config, device, modes=TTA_MODES, max_batches=None):
     was_training = model.training
     model.train(mode=False)
-    normalized_modes = tuple(normalize_tta_mode(mode) for mode in modes)
-    mae_sums = {mode: 0.0 for mode in normalized_modes}
-    count = 0
-    processed_batches = 0
+    try:
+        normalized_modes = tuple(normalize_tta_mode(mode) for mode in modes)
+        mae_sums = {mode: 0.0 for mode in normalized_modes}
+        count = 0
+        processed_batches = 0
 
-    with torch.no_grad():
-        for images, _labels, ages in loader:
-            if images.numel() == 0:
-                continue
+        with torch.no_grad():
+            for images, _labels, ages in loader:
+                if images.numel() == 0:
+                    continue
 
-            images = images.to(device)
-            ages = ages.to(device)
+                images = images.to(device)
+                ages = ages.to(device)
 
-            for mode in normalized_modes:
-                probs = predict_probs(
-                    model,
-                    images,
-                    mode=mode,
-                    base_size=config.img_size,
-                    max_augmented_batch_size=getattr(config, "tta_batch_size", None),
-                )
-                mae_sums[mode] += mae_from_probs(probs, ages, config.num_classes)
-            count += images.size(0)
-            processed_batches += 1
-            if max_batches is not None and processed_batches >= max_batches:
-                break
+                for mode in normalized_modes:
+                    probs = predict_probs(
+                        model,
+                        images,
+                        mode=mode,
+                        base_size=config.img_size,
+                        max_augmented_batch_size=getattr(config, "tta_batch_size", None),
+                    )
+                    mae_sums[mode] += mae_from_probs(probs, ages, config.num_classes)
+                count += images.size(0)
+                processed_batches += 1
+                if max_batches is not None and processed_batches >= max_batches:
+                    break
 
-    if count == 0:
+        if count == 0:
+            raise RuntimeError("No valid evaluation samples were loaded.")
+
+        return {mode: mae_sums[mode] / count for mode in normalized_modes}
+    finally:
         if was_training:
             model.train()
-        raise RuntimeError("No valid evaluation samples were loaded.")
-
-    if was_training:
-        model.train()
-    return {mode: mae_sums[mode] / count for mode in normalized_modes}

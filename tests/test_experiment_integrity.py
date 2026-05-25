@@ -348,13 +348,19 @@ class ExperimentIntegrityTests(unittest.TestCase):
 
         self.assertNotEqual("fade-head-v1", expected["backbone"]["head_version"])
         mismatches = checkpoint_metadata_mismatches({"metadata": legacy_meta}, expected)
-        self.assertIn("backbone", {key for key, _, _ in mismatches})
+        self.assertNotIn("backbone", {key for key, _, _ in mismatches})
 
         missing_version_meta = build_training_metadata(cfg, seed=42)
         missing_version_meta["experiment_id"] = expected["experiment_id"]
         missing_version_meta["backbone"].pop("head_version")
         missing_version_mismatches = checkpoint_metadata_mismatches({"metadata": missing_version_meta}, expected)
-        self.assertIn("backbone", {key for key, _, _ in missing_version_mismatches})
+        self.assertNotIn("backbone", {key for key, _, _ in missing_version_mismatches})
+
+        incompatible_meta = build_training_metadata(cfg, seed=42)
+        incompatible_meta["experiment_id"] = expected["experiment_id"]
+        incompatible_meta["backbone"]["name"] = "resnet50"
+        incompatible_mismatches = checkpoint_metadata_mismatches({"metadata": incompatible_meta}, expected)
+        self.assertIn("backbone", {key for key, _, _ in incompatible_mismatches})
 
     def test_missing_required_nested_metadata_keys_are_mismatches(self):
         cfg = self.make_config()

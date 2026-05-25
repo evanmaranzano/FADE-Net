@@ -32,6 +32,7 @@ from experiment import (
     populate_runtime_model_metadata,
 )
 from evaluation import TTA_MODES, evaluate_mae
+from utils import remap_state_dict_keys
 
 
 DEFAULT_SWA_SEEDS = (42, 3407, 2026, 1337)
@@ -49,7 +50,10 @@ def average_checkpoints(checkpoint_paths, device='cpu'):
     
     for i, path in enumerate(checkpoint_paths):
         print(f"   Loading [{i+1}/{n}]: {os.path.basename(path)}")
-        checkpoint = torch.load(path, map_location=device)
+        try:
+            checkpoint = torch.load(path, map_location=device, weights_only=True)
+        except TypeError:
+            checkpoint = torch.load(path, map_location=device)
         if not isinstance(checkpoint, dict) or 'model_state_dict' not in checkpoint:
             raise RuntimeError(f"Checkpoint is not a packaged training checkpoint: {path}")
         if metadata is None:
@@ -188,7 +192,7 @@ def main():
             print(f"\n📊 Evaluating SWA model...")
             
             model = LightweightAgeEstimator(cfg)
-            model.load_state_dict(avg_state)
+            model.load_state_dict(remap_state_dict_keys(avg_state))
             model.to(device)
             
             test_metrics = evaluate_mae(model, test_loader, cfg, device, modes=TTA_MODES)
@@ -207,7 +211,7 @@ def main():
                 mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
                 if mismatches:
                     raise RuntimeError(f"Best model metadata mismatch; refusing comparison. {format_metadata_mismatches(mismatches)}")
-                model.load_state_dict(best_state)
+                model.load_state_dict(remap_state_dict_keys(best_state))
                 orig_metrics = evaluate_mae(model, test_loader, cfg, device, modes=TTA_MODES)
                 orig_mae = orig_metrics[selected_tta]
                 print(f"📋 Original Best MAE: {orig_mae:.4f}")

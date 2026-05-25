@@ -40,6 +40,7 @@ from experiment import (
     checkpoint_metadata_mismatches,
     load_model_state_package,
 )
+from utils import remap_state_dict_keys
 
 
 def apply_common_overrides(cfg, args):
@@ -73,7 +74,7 @@ def load_checked_model(model_path, cfg, seed, device):
     mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
     if mismatches:
         raise RuntimeError(f"Checkpoint metadata mismatch; refusing to evaluate. {format_metadata_mismatches(mismatches)}")
-    model.load_state_dict(state_dict)
+    model.load_state_dict(remap_state_dict_keys(state_dict))
     model.to(device)
     model.eval()
     return model

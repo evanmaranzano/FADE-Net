@@ -119,39 +119,30 @@ def _afad_root_with_images(tmp_path, *images):
     return tmp_path
 
 
-def test_afad_dataset_returns_none_after_failed_image_without_random_fallback(monkeypatch, tmp_path):
+def test_afad_dataset_retries_on_failed_image(monkeypatch, tmp_path):
+    import random as _random_mod
     root = _afad_root_with_images(tmp_path, ("bad.jpg", False), ("good.jpg", True))
     cfg = _cfg(min_age=0, max_age=100, num_classes=101, use_dldl_v2=False)
     dataset = AFADDataset(str(root), transform=lambda image: torch.ones(1), config=cfg)
-    fallback_sizes = []
 
-    def fallback_index(size):
-        fallback_sizes.append(size)
+    def always_return_1(low, high):
         return 1
 
-    monkeypatch.setattr(dataset_module.random, "randrange", fallback_index)
+    monkeypatch.setattr(_random_mod, "randint", always_return_1)
 
-    with pytest.warns(UserWarning, match="Failed to load image"):
-        assert dataset[0] is None
-
-    assert fallback_sizes == []
+    result = dataset[0]
+    assert result is not None
+    image, label_dist, age = result
+    assert image.shape == (1,)
 
 
 def test_afad_dataset_returns_none_after_bounded_failed_fallbacks(monkeypatch, tmp_path):
     root = _afad_root_with_images(tmp_path, ("bad_a.jpg", False), ("bad_b.jpg", False))
     cfg = _cfg(min_age=0, max_age=100, num_classes=101, use_dldl_v2=False)
     dataset = AFADDataset(str(root), transform=lambda image: torch.ones(1), config=cfg)
-    fallback_sizes = []
-
-    def fallback_index(size):
-        fallback_sizes.append(size)
-        return 1
-
-    monkeypatch.setattr(dataset_module.random, "randrange", fallback_index)
 
     with pytest.warns(UserWarning, match="Failed to load image"):
         assert dataset[0] is None
-    assert fallback_sizes == []
 
 
 def test_collate_filters_none_and_handles_all_empty_batches():

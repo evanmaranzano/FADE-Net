@@ -46,12 +46,14 @@ class FeatureBackbone(nn.Module):
 
         was_training = self.training
         self.eval()
-        device = next(self.parameters()).device
-        probe = torch.zeros(1, 3, img_size, img_size, device=device)
-        with torch.no_grad():
-            deep, captured = self.forward_features(probe, capture_indices=feature_indices)
-        if was_training:
-            self.train()
+        try:
+            device = next(self.parameters()).device
+            probe = torch.zeros(1, 3, img_size, img_size, device=device)
+            with torch.no_grad():
+                deep, captured = self.forward_features(probe, capture_indices=feature_indices)
+        finally:
+            if was_training:
+                self.train()
 
         missing = [idx for idx in feature_indices if idx not in captured]
         if missing:

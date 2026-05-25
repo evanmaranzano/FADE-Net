@@ -218,30 +218,47 @@ def _expected_keys_dict_eq(actual: Any, expected: Any) -> bool:
     return all(actual[k] == expected[k] for k in expected)
 
 
+_AUGMENTATION_DEFAULTS: dict[str, Any] = {
+    "image_mean": DEFAULT_IMAGE_MEAN,
+    "image_std": DEFAULT_IMAGE_STD,
+    "use_mixup": False,
+    "mixup_alpha": None,
+    "mixup_prob": None,
+    "use_sigma_jitter": False,
+    "sigma_jitter": None,
+    "use_random_erasing": False,
+    "re_prob": None,
+}
+
+
 def _augmentation_dict_eq(actual: Any, expected: Any) -> bool:
     if not isinstance(actual, dict) or not isinstance(expected, dict):
         return actual == expected
-    actual = {
-        "image_mean": DEFAULT_IMAGE_MEAN,
-        "image_std": DEFAULT_IMAGE_STD,
-        **actual,
-    }
-    expected = {
-        "image_mean": DEFAULT_IMAGE_MEAN,
-        "image_std": DEFAULT_IMAGE_STD,
-        **expected,
-    }
+    actual = {**_AUGMENTATION_DEFAULTS, **actual}
+    expected = {**_AUGMENTATION_DEFAULTS, **expected}
     return _intersection_dict_eq(actual, expected)
+
+
+_BACKBONE_LEGACY_DEFAULTS: dict[str, Any] = {
+    "head_version": LEGACY_HEAD_VERSION,
+    "effective_pretrained": True,
+    "effective_msff_channels": [],
+    "effective_msff_spatial": [],
+    "effective_deep_channels": None,
+}
 
 
 def _backbone_dict_eq(actual: Any, expected: Any, ignored_keys: tuple[str, ...] = ()) -> bool:
     if not isinstance(actual, dict) or not isinstance(expected, dict):
         return actual == expected
-    actual = {"head_version": LEGACY_HEAD_VERSION, **actual}
-    expected = {"head_version": DEFAULT_HEAD_VERSION, **expected}
+    actual = {**_BACKBONE_LEGACY_DEFAULTS, **actual}
+    expected = {**_BACKBONE_LEGACY_DEFAULTS, **expected}
     for key in ignored_keys:
         actual.pop(key, None)
         expected.pop(key, None)
+    if actual.get("head_version") in (LEGACY_HEAD_VERSION, DEFAULT_HEAD_VERSION) and expected.get("head_version") in (LEGACY_HEAD_VERSION, DEFAULT_HEAD_VERSION):
+        actual.pop("head_version", None)
+        expected.pop("head_version", None)
     return _expected_keys_dict_eq(actual, expected)
 
 
@@ -249,7 +266,7 @@ def _regularization_schedule_eq(actual: Any, expected: Any, expected_epochs: int
     if actual is None:
         legacy_compatible_expected = (
             {},
-            {"hard_distillation": hard_distillation_schedule_metadata(expected_epochs or 120)},
+            {"hard_distillation": hard_distillation_schedule_metadata(expected_epochs if expected_epochs is not None else 120)},
         )
         return expected in legacy_compatible_expected
     return actual == expected
@@ -338,6 +355,7 @@ def load_model_state_package(path: str, device):
     try:
         checkpoint = torch.load(path, map_location=device, weights_only=True)
     except TypeError:
+        print(f"WARNING: weights_only=True not supported, falling back to unsafe loading: {path}")
         checkpoint = torch.load(path, map_location=device)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         return checkpoint["model_state_dict"], checkpoint

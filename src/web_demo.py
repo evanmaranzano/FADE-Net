@@ -25,7 +25,7 @@ from experiment import (
     load_model_state_package,
     populate_runtime_model_metadata,
 )
-from utils import DLDLProcessor
+from utils import DLDLProcessor, remap_state_dict_keys
 
 # ================= Configuration & Styles =================
 st.set_page_config(
@@ -212,7 +212,7 @@ def load_model(model_path=None):
         mismatches = inference_checkpoint_metadata_mismatches(checkpoint, expected_metadata)
         if mismatches:
             raise RuntimeError(format_metadata_mismatches(mismatches))
-        model.load_state_dict(state_dict)
+        model.load_state_dict(remap_state_dict_keys(state_dict))
         model.eval()
     except Exception as e:
         st.error(f"Failed to load model: {e}")

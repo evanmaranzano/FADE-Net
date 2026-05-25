@@ -8,7 +8,27 @@ import os
 from contextlib import nullcontext
 
 # ==========================================
-# 0. Reproducibility Tool
+# 0. State Dict Compatibility
+# ==========================================
+_BUFFER_KEY_REMAP = {
+    "imagenet_mean": "image_mean",
+    "imagenet_std": "image_std",
+}
+
+
+def remap_state_dict_keys(state_dict: dict) -> dict:
+    """Remap renamed buffer keys for backward-compatible checkpoint loading."""
+    remapped = {}
+    for k, v in state_dict.items():
+        new_key = k
+        for old, new in _BUFFER_KEY_REMAP.items():
+            new_key = new_key.replace(old, new)
+        remapped[new_key] = v
+    return remapped
+
+
+# ==========================================
+# 0b. Reproducibility Tool
 # ==========================================
 def seed_everything(seed=42):
     """
@@ -125,28 +145,25 @@ class EMAModel:
 
     def update(self):
         for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                if name not in self.shadow:
-                    raise KeyError(f"EMA update: {name} not in shadow. Was register() called?")
-                new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
-                self.shadow[name] = new_average.clone()
+            if name not in self.shadow:
+                raise KeyError(f"EMA update: {name} not in shadow. Was register() called?")
+            new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
+            self.shadow[name] = new_average.clone()
 
     def apply_shadow(self):
         if self.backup:
             raise RuntimeError("EMA apply_shadow() called before restore().")
         for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                if name not in self.shadow:
-                    raise KeyError(f"EMA apply_shadow: {name} not in shadow. Was register() called?")
-                self.backup[name] = param.data.clone()
-                param.data = self.shadow[name]
+            if name not in self.shadow:
+                raise KeyError(f"EMA apply_shadow: {name} not in shadow. Was register() called?")
+            self.backup[name] = param.data.clone()
+            param.data = self.shadow[name]
 
     def restore(self):
         for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                if name not in self.backup:
-                    raise KeyError(f"EMA restore: {name} not in backup. Was apply_shadow() called?")
-                param.data = self.backup[name]
+            if name not in self.backup:
+                raise KeyError(f"EMA restore: {name} not in backup. Was apply_shadow() called?")
+            param.data = self.backup[name]
         self.backup = {}
 
 # ==========================================
@@ -491,7 +508,7 @@ class CombinedLoss(nn.Module):
             gate_probs = torch.exp(gate_log_probs)
             loss_moe_gate = F.kl_div(gate_log_probs, gate_targets, reduction='batchmean')
             loss_moe_balance = self._moe_batch_balance_loss(gate_probs, target_dists, log_probs.device)
-            logged_moe_gate = loss_moe_gate + loss_moe_balance
+            logged_moe_gate = self.lambda_moe_gate * loss_moe_gate + self.lambda_moe_balance * loss_moe_balance
             term_moe_gate = self.lambda_moe_gate * loss_moe_gate + self.lambda_moe_balance * loss_moe_balance
         else:
             logged_moe_gate = loss_moe_gate

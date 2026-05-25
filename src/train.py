@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader
 from config import Config, ROOT_DIR
 from dataset import get_dataloaders
 from model import LightweightAgeEstimator
-from utils import DLDLProcessor, EMAModel, CombinedLoss, seed_everything
+from utils import DLDLProcessor, EMAModel, CombinedLoss, seed_everything, remap_state_dict_keys
 import csv
 import time
 import numpy as np
@@ -479,11 +479,12 @@ def train(args):
         try:
             checkpoint = torch.load(checkpoint_path, map_location=cfg.device, weights_only=True)
         except TypeError:
+            print(f"WARNING: weights_only=True not supported, falling back to unsafe loading: {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path, map_location=cfg.device)
         mismatches = checkpoint_metadata_mismatches(checkpoint, training_metadata)
         if mismatches:
             raise RuntimeError(f"Checkpoint metadata mismatch; refusing to resume. {_format_metadata_mismatches(mismatches)}")
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(remap_state_dict_keys(checkpoint['model_state_dict']))
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         start_epoch = checkpoint['epoch'] + 1 
         best_mae = checkpoint.get('best_mae', float('inf'))
@@ -493,7 +494,17 @@ def train(args):
         
         # 恢复 EMA
         if ema and 'ema_state_dict' in checkpoint:
-            ema.shadow = checkpoint['ema_state_dict']
+            model_keys = set(model.state_dict().keys())
+            ema_keys = set(checkpoint['ema_state_dict'].keys())
+            missing = model_keys - ema_keys
+            stale = ema_keys - model_keys
+            if stale:
+                print(f"⚠️ EMA state has stale keys (ignored): {stale}")
+            if missing:
+                print(f"⚠️ EMA state missing keys (will use current weights): {missing}")
+            ema.shadow = {k: v for k, v in checkpoint['ema_state_dict'].items() if k in model_keys}
+            for k in missing:
+                ema.shadow[k] = model.state_dict()[k].clone()
             print("✅ EMA 状态已恢复")
             
         print(f"✅ 恢复成功！从 Epoch {start_epoch+1} 开始。最佳 MAE: {best_mae:.2f}")
@@ -837,7 +848,7 @@ def train(args):
             mismatches = checkpoint_metadata_mismatches(checkpoint, training_metadata)
             if mismatches:
                 raise RuntimeError(f"Best model metadata mismatch; refusing final evaluation. {_format_metadata_mismatches(mismatches)}")
-            model.load_state_dict(state_dict)
+            model.load_state_dict(remap_state_dict_keys(state_dict))
             print(f"📂 Loaded Best Model from {best_model_path}")
         
         test_metrics = evaluate_mae(model, test_loader, cfg, cfg.device, modes=TTA_MODES, max_batches=max_test_batches)

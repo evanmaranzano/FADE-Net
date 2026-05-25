@@ -29,7 +29,7 @@ from experiment import (
     inference_compatible_best_model_paths,
     load_model_state_package,
 )
-from utils import DLDLProcessor
+from utils import DLDLProcessor, remap_state_dict_keys
 
 # ================= 样式表 =================
 STYLESHEET = """
@@ -306,7 +306,7 @@ def load_compatible_weights(model, cfg, model_path, device, seed=42):
     mismatches = inference_checkpoint_metadata_mismatches(checkpoint, expected_metadata)
     if mismatches:
         raise RuntimeError(format_metadata_mismatches(mismatches))
-    model.load_state_dict(state_dict)
+    model.load_state_dict(remap_state_dict_keys(state_dict))
     model.eval()
 
 
