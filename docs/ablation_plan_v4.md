@@ -12,7 +12,7 @@ HA（CoordAtt 注入）不适用于 timm backbone（无 SE 块可替换）。V4-
 - **Seeds**：42, 3407, 2026（3 seeds，用于 mean/std）
 - **Epochs**：20
 - **Pretrained**：是（ImageNet 预训练权重）
-- **审计**：所有结果必须通过 `scripts/audit_paper_results.py --split_file_tag formal_v1` 判定 `paper-ready`
+- **审计**：所有结果行必须通过 `scripts/audit_paper_results.py --split_file_tag formal_v1` 判定 `paper-ready`；最终 mean/std 主表只接受 summary 中的 `complete` 行
 
 ## 消融配置
 
@@ -224,7 +224,7 @@ EPOCHS=20
 
 ## 当前进度
 
-- [x] A3 Full seed42: MAE=3.6130 (paper-ready)
+- [x] A3 Full seed42: MAE=3.6130 (paper-ready single-row evidence; not final mean/std)
 - [ ] A3 Full seed3407
 - [ ] A3 Full seed2026
 - [ ] A0 Baseline seed42

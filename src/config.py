@@ -29,7 +29,7 @@ class Config:
     experiment_tag = None
     split_file_tag = None
     allow_legacy_split_upgrade = False
-    head_version = "fade-head-v1"
+    head_version = "fade-head-v2"
     hybrid_attention_blocks = 4
     msff_feature_indices = (6, 12)
     fusion_dim = 64
@@ -95,14 +95,16 @@ class Config:
 
     # Adaptive Triplet Loss (M2)
     lambda_triplet = 0.1
-    triplet_base_margin = 1.0
-    triplet_alpha = 0.05
+    triplet_base_margin = 0.2
+    triplet_alpha = 0.01
+    triplet_max_margin = 0.5
     triplet_age_threshold = 3.0  # years: within this = positive pair
 
     # MoE Head (M5)
     moe_num_experts = 3
     moe_hidden_dim = 256
     lambda_moe_gate = 0.02
+    lambda_moe_balance = 0.005
 
     # Asymmetric Ordinal Loss (M3)
     lambda_asym = 0.1
@@ -154,6 +156,8 @@ class Config:
     
     # 图片参数
     img_size = 224
+    image_mean = [0.485, 0.456, 0.406]
+    image_std = [0.229, 0.224, 0.225]
     num_workers = 4              # 🏎️ Optimized for CPU usage (avoid 100% load)
     early_stopping_patience = 999 # 🛡️ 2027 Strategy: "Trust the Process". Let Cosine Annealing finish its full cycle.
 

@@ -24,9 +24,9 @@ from config import Config, ROOT_DIR # Added ROOT_DIR
 from experiment import (
     artifact_path,
     build_training_metadata,
-    checkpoint_metadata_mismatches,
-    compatible_best_model_paths,
     format_metadata_mismatches,
+    inference_checkpoint_metadata_mismatches,
+    inference_compatible_best_model_paths,
     load_model_state_package,
 )
 from utils import DLDLProcessor
@@ -303,7 +303,7 @@ def multi_scale_tta(images, model, base_size=224):
 def load_compatible_weights(model, cfg, model_path, device, seed=42):
     state_dict, checkpoint = load_model_state_package(model_path, device)
     expected_metadata = build_training_metadata(cfg, seed)
-    mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+    mismatches = inference_checkpoint_metadata_mismatches(checkpoint, expected_metadata)
     if mismatches:
         raise RuntimeError(format_metadata_mismatches(mismatches))
     model.load_state_dict(state_dict)
@@ -311,10 +311,7 @@ def load_compatible_weights(model, cfg, model_path, device, seed=42):
 
 
 def default_model_path(cfg, device, seed=42):
-    exact_path = artifact_path(ROOT_DIR, "best_model", cfg, seed, ".pth")
-    if os.path.exists(exact_path):
-        return exact_path
-    compatible, incompatible = compatible_best_model_paths(ROOT_DIR, cfg, seed=seed, device=device)
+    compatible, incompatible = inference_compatible_best_model_paths(ROOT_DIR, cfg, seed=seed, device=device)
     if compatible:
         print(f"DEBUG: Auto-discovered compatible model: {os.path.basename(compatible[0])}", flush=True)
         return compatible[0]
@@ -340,7 +337,6 @@ class WorkerThread(QThread):
         self.crop_scale = 1.5
         self.shift_vertical = 0.30
         self.shift_horizontal = 0.05
-        self.calibration_offset = 0.0
         self.smooth_window = 15
         
         # Global Bias Correction (Calibrated)
@@ -379,7 +375,7 @@ class WorkerThread(QThread):
         self.transform = transforms.Compose([
             transforms.Resize((self.cfg.img_size, self.cfg.img_size)),
             transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+            transforms.Normalize(mean=self.cfg.image_mean, std=self.cfg.image_std)
         ])
         print("DEBUG: Initializing MediaPipe...", flush=True)
         self.mp_face_detection = mp.solutions.face_detection
@@ -481,11 +477,11 @@ class WorkerThread(QThread):
                                 raw_peak = torch.argmax(probs, dim=1).item()
                             
                             if self.mode == 'image':
-                                final_mean = (raw_mean * self.bias_alpha + self.bias_beta) + self.calibration_offset
+                                final_mean = raw_mean * self.bias_alpha + self.bias_beta
                             else:
                                 self.mean_buffer.append(raw_mean)
                                 avg_smooth = sum(self.mean_buffer) / len(self.mean_buffer)
-                                final_mean = (avg_smooth * self.bias_alpha + self.bias_beta) + self.calibration_offset
+                                final_mean = avg_smooth * self.bias_alpha + self.bias_beta
                             
                             # Logic Lock: Clamp to physical limits (1-100)
                             final_mean = max(1, min(final_mean, 100))
@@ -504,8 +500,8 @@ class WorkerThread(QThread):
                                 low_idx = raw_peak
                                 high_idx = raw_peak
                             
-                            final_low = low_idx + self.calibration_offset
-                            final_high = high_idx + self.calibration_offset
+                            final_low = low_idx
+                            final_high = high_idx
                             
                             interval_str = f"{int(final_low)}-{int(final_high)}"
                             
@@ -549,9 +545,6 @@ class WorkerThread(QThread):
         self.shift_vertical = shift_v
         self.shift_horizontal = shift_h
 
-    def set_calibration_offset(self, val):
-        self.calibration_offset = val
-
     def load_new_model(self, model_path):
         print(f"🔄 Loading new model from: {model_path}", flush=True)
         try:
@@ -572,7 +565,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("表观年龄估计系统 v17.0 (Safe & Final)")
         self.setStyleSheet(STYLESHEET)
-        self.secret_calibration = 0.0
 
         screen = QApplication.primaryScreen().geometry()
         initial_w = int(screen.width() * 0.7)
@@ -723,7 +715,7 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.status_bar)
         
         device_name = "CUDA (GPU)" if torch.cuda.is_available() else "CPU"
-        self.status_bar.showMessage(f"System Ready | Backend: {device_name} | SysOffset: {self.secret_calibration:+.1f}")
+        self.status_bar.showMessage(f"System Ready | Backend: {device_name}")
 
         self.thread = WorkerThread()
         self.thread.change_pixmap_signal.connect(self.update_image)
@@ -733,16 +725,6 @@ class MainWindow(QMainWindow):
         
         self.setFocusPolicy(Qt.StrongFocus)
 
-    def keyPressEvent(self, event):
-        key = event.key()
-        if key == Qt.Key_Up: self.secret_calibration += 1.0
-        elif key == Qt.Key_Down: self.secret_calibration -= 1.0
-        elif key == Qt.Key_Right: self.secret_calibration += 0.1
-        elif key == Qt.Key_Left: self.secret_calibration -= 0.1
-        self.thread.set_calibration_offset(self.secret_calibration)
-        device_name = "CUDA (GPU)" if torch.cuda.is_available() else "CPU"
-        self.status_bar.showMessage(f"Processing | Backend: {device_name} | SysOffset: {self.secret_calibration:+.1f}")
-        
     def start_camera(self):
         if self.thread.isRunning(): return
         if not self.thread.model_loaded:

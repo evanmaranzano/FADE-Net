@@ -79,10 +79,12 @@ class TextureEnhanceBranch(nn.Module):
     """Lightweight branch that extracts high-frequency texture features from
     Sobel-filtered facial texture maps. Inspired by HEAT (Multimedia Systems 2026)."""
 
-    def __init__(self, out_dim=64):
+    def __init__(self, out_dim=64, image_mean=None, image_std=None):
         super().__init__()
-        self.register_buffer("imagenet_mean", torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-        self.register_buffer("imagenet_std", torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
+        image_mean = [0.485, 0.456, 0.406] if image_mean is None else image_mean
+        image_std = [0.229, 0.224, 0.225] if image_std is None else image_std
+        self.register_buffer("image_mean", torch.tensor(image_mean, dtype=torch.float32).view(1, 3, 1, 1))
+        self.register_buffer("image_std", torch.tensor(image_std, dtype=torch.float32).view(1, 3, 1, 1))
         self.sobel = SobelTextureExtractor()
         self.encoder = nn.Sequential(
             nn.Conv2d(1, 16, 3, stride=2, padding=1, bias=False),
@@ -103,7 +105,7 @@ class TextureEnhanceBranch(nn.Module):
         self.out_dim = out_dim
 
     def forward(self, x_rgb):
-        x_rgb = (x_rgb * self.imagenet_std + self.imagenet_mean).clamp(0.0, 1.0)
+        x_rgb = (x_rgb * self.image_std + self.image_mean).clamp(0.0, 1.0)
         gray = 0.299 * x_rgb[:, 0:1] + 0.587 * x_rgb[:, 1:2] + 0.114 * x_rgb[:, 2:3]
         texture_map = self.sobel(gray)
         feat = self.encoder(texture_map)
@@ -124,6 +126,7 @@ class FrequencyDomainAttention(nn.Module):
         self.act = nn.Hardswish()
         self.expand = nn.Linear(mid, channels, bias=False)
         self.sigmoid = nn.Sigmoid()
+        self.gamma = nn.Parameter(torch.tensor(0.0))
         self.register_buffer("dct_basis", self._build_dct_basis(pool_size), persistent=False)
 
     @staticmethod
@@ -159,8 +162,8 @@ class FrequencyDomainAttention(nn.Module):
         attn = self.expand(attn)
         attn = self.sigmoid(attn)
         if x.dim() == 4:
-            return x * attn.view(b, c, 1, 1)
-        return x * attn
+            return x * (1.0 + self.gamma * (attn.view(b, c, 1, 1) - 0.5))
+        return x * (1.0 + self.gamma * (attn - 0.5))
 
 
 class AgeMoEHead(nn.Module):
@@ -285,7 +288,11 @@ class LightweightAgeEstimator(nn.Module):
         self.use_texture_branch = bool(getattr(config, "use_texture_branch", False))
         if self.use_texture_branch:
             print("[Model] Texture Enhancement Branch: ENABLED")
-            self.texture_branch = TextureEnhanceBranch(out_dim=64)
+            self.texture_branch = TextureEnhanceBranch(
+                out_dim=64,
+                image_mean=getattr(config, "image_mean", None),
+                image_std=getattr(config, "image_std", None),
+            )
             texture_dim = self.texture_branch.out_dim
         else:
             print("[Model] Texture Enhancement Branch: DISABLED")

@@ -1,6 +1,7 @@
 import os
 import argparse
 import re
+import random
 from contextlib import nullcontext
 
 import torch
@@ -20,6 +21,8 @@ from experiment import (
     artifact_path,
     build_training_metadata,
     checkpoint_metadata_mismatches,
+    hard_distillation_schedule_metadata as _metadata_hard_distillation_schedule_metadata,
+    hard_distillation_start_epoch as _metadata_hard_distillation_start_epoch,
     load_model_state_package,
     save_model_package,
 )
@@ -79,6 +82,46 @@ def amp_step_was_skipped(scale_before, scale_after):
     return scale_after < scale_before
 
 
+def _pack_numpy_random_state(state):
+    name, keys, pos, has_gauss, cached_gaussian = state
+    return (name, keys.tolist(), pos, has_gauss, cached_gaussian)
+
+
+def _unpack_numpy_random_state(state):
+    name, keys, pos, has_gauss, cached_gaussian = state
+    return (name, np.array(keys, dtype=np.uint32), pos, has_gauss, cached_gaussian)
+
+
+def checkpoint_extra_state(scheduler_controller, scaler=None):
+    state = {
+        "python_random_state": random.getstate(),
+        "numpy_random_state": _pack_numpy_random_state(np.random.get_state()),
+        "torch_rng_state": torch.get_rng_state(),
+        "scheduler_controller_pending_steps": int(getattr(scheduler_controller, "pending_steps", 0)),
+    }
+    if scaler is not None:
+        state["scaler_state_dict"] = scaler.state_dict()
+    if torch.cuda.is_available():
+        state["cuda_rng_state_all"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def restore_checkpoint_extra_state(checkpoint, scheduler_controller, scaler=None):
+    if not isinstance(checkpoint, dict):
+        return
+    if "python_random_state" in checkpoint:
+        random.setstate(checkpoint["python_random_state"])
+    if "numpy_random_state" in checkpoint:
+        np.random.set_state(_unpack_numpy_random_state(checkpoint["numpy_random_state"]))
+    if "torch_rng_state" in checkpoint:
+        torch.set_rng_state(checkpoint["torch_rng_state"].cpu())
+    if torch.cuda.is_available() and "cuda_rng_state_all" in checkpoint:
+        torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state_all"])
+    if scaler is not None and "scaler_state_dict" in checkpoint:
+        scaler.load_state_dict(checkpoint["scaler_state_dict"])
+    scheduler_controller.pending_steps = int(checkpoint.get("scheduler_controller_pending_steps", 0))
+
+
 def backbone_learning_rate(base_lr, effective_pretrained):
     return base_lr * 0.1 if effective_pretrained else base_lr
 
@@ -94,7 +137,11 @@ def model_forward_for_loss(model, cfg, images):
 
 
 def hard_distillation_start_epoch(total_epochs, default_start=105, tail_epochs=15):
-    return min(default_start, max(0, total_epochs - tail_epochs))
+    return _metadata_hard_distillation_start_epoch(total_epochs, default_start, tail_epochs)
+
+
+def hard_distillation_schedule_metadata(total_epochs):
+    return _metadata_hard_distillation_schedule_metadata(total_epochs)
 
 
 class SchedulerStepController:
@@ -104,10 +151,9 @@ class SchedulerStepController:
         self.pending_steps = 0
 
     def step_epoch(self, epoch, optimizer_stepped):
-        if epoch >= self.max_epochs:
-            return 0
-        self.pending_steps += 1
-        if not optimizer_stepped:
+        if epoch < self.max_epochs:
+            self.pending_steps += 1
+        if not optimizer_stepped or self.pending_steps == 0:
             return 0
         steps = self.pending_steps
         for _ in range(steps):
@@ -152,7 +198,10 @@ def _guard_fresh_artifact_overwrite(paths, expected_metadata, device, allow_over
         detail = "non-checkpoint artifact"
         if str(path).endswith(".pth"):
             try:
-                checkpoint = torch.load(path, map_location=device)
+                try:
+                    checkpoint = torch.load(path, map_location=device, weights_only=True)
+                except TypeError:
+                    checkpoint = torch.load(path, map_location=device)
                 mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
                 detail = (
                     "checkpoint metadata matches current run"
@@ -173,19 +222,25 @@ def _guard_fresh_artifact_overwrite(paths, expected_metadata, device, allow_over
         )
 
 
-def _average_loss_sums(loss_sums, batch_count):
-    return {name: value / batch_count for name, value in loss_sums.items()}
+def _average_loss_sums(loss_sums, sample_count):
+    if sample_count <= 0:
+        raise ValueError(f"sample_count must be positive, got {sample_count}")
+    return {name: value / sample_count for name, value in loss_sums.items()}
 
 
-def _accumulate_loss_components(loss_sums, total_loss, kl_loss, l1_loss, rank_loss, mv_loss, triplet_loss=0.0, asym_loss=0.0, moe_gate_loss=0.0):
-    loss_sums["total"] += total_loss
-    loss_sums["kl"] += kl_loss
-    loss_sums["l1"] += l1_loss
-    loss_sums["rank"] += rank_loss
-    loss_sums["mv"] += mv_loss
-    loss_sums["triplet"] += triplet_loss
-    loss_sums["asym"] += asym_loss
-    loss_sums["moe_gate"] += moe_gate_loss
+def _accumulate_loss_components(loss_sums, batch_size, total_loss, kl_loss, l1_loss=0.0, rank_loss=0.0, mv_loss=0.0, triplet_loss=0.0, asym_loss=0.0, moe_gate_loss=0.0):
+    for name, value in (
+        ("total", total_loss),
+        ("kl", kl_loss),
+        ("l1", l1_loss),
+        ("rank", rank_loss),
+        ("mv", mv_loss),
+        ("triplet", triplet_loss),
+        ("asym", asym_loss),
+        ("moe_gate", moe_gate_loss),
+    ):
+        if name in loss_sums:
+            loss_sums[name] += value * batch_size
 
 
 def apply_hard_distillation_mode(cfg, train_loader, val_loader):
@@ -336,12 +391,14 @@ def train(args):
         )
 
     dldl_tools = DLDLProcessor(cfg)
+    cfg.regularization_schedule = {
+        "hard_distillation": hard_distillation_schedule_metadata(cfg.epochs),
+    }
     
     # ==========================================
     # 2. 准备数据 (Stratified SOTA)
     # ==========================================
     train_loader, val_loader, test_loader, class_weights = get_dataloaders(cfg)
-    training_metadata = build_training_metadata(cfg, seed)
 
     # 打印分布信息
     print(f"Dataset Size: Train={len(train_loader.dataset)}, Val={len(val_loader.dataset)}, Test={len(test_loader.dataset)}")
@@ -356,7 +413,8 @@ def train(args):
     if cfg.backbone_pretrained and not effective_pretrained:
         print("⚠️ CRITICAL: Pretrained weights FAILED to load. Training with random initialization!")
         print("   Experiment metadata will record effective_pretrained=False")
-    training_metadata['backbone']['effective_pretrained'] = effective_pretrained
+    cfg.effective_pretrained = effective_pretrained
+    training_metadata = build_training_metadata(cfg, seed)
     
     # 3. 初始化 EMA
     ema = None
@@ -418,7 +476,10 @@ def train(args):
 
     if should_resume and os.path.exists(checkpoint_path):
         print(f"🔄 发现存档 '{checkpoint_path}'，正在恢复...")
-        checkpoint = torch.load(checkpoint_path, map_location=cfg.device)
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location=cfg.device, weights_only=True)
+        except TypeError:
+            checkpoint = torch.load(checkpoint_path, map_location=cfg.device)
         mismatches = checkpoint_metadata_mismatches(checkpoint, training_metadata)
         if mismatches:
             raise RuntimeError(f"Checkpoint metadata mismatch; refusing to resume. {_format_metadata_mismatches(mismatches)}")
@@ -428,6 +489,7 @@ def train(args):
         best_mae = checkpoint.get('best_mae', float('inf'))
         if 'scheduler_state_dict' in checkpoint:
             scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        restore_checkpoint_extra_state(checkpoint, scheduler_controller, scaler)
         
         # 恢复 EMA
         if ema and 'ema_state_dict' in checkpoint:
@@ -584,16 +646,28 @@ def train(args):
                     ema.update()
                     
                 loss_value = loss.item()
-                train_loss += loss_value
+                current_batch_size = true_ages.size(0)
+                train_loss += loss_value * current_batch_size
                 train_batches += 1
-                _accumulate_loss_components(train_loss_sums, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate)
+                _accumulate_loss_components(
+                    train_loss_sums,
+                    current_batch_size,
+                    loss_value,
+                    loss_kl,
+                    loss_l1,
+                    loss_rank,
+                    loss_mv,
+                    loss_triplet,
+                    loss_asym,
+                    loss_moe_gate,
+                )
                 
                 # 计算 MAE (Monitor)
                 with torch.no_grad():
                     probs = F.softmax(logits, dim=1)
                     pred_ages = dldl_tools.expectation_regression(probs)
                     train_mae_sum += torch.sum(torch.abs(pred_ages - true_ages)).item()
-                    train_samples += true_ages.size(0)
+                    train_samples += current_batch_size
                 
                 if (batch_idx + 1) % 100 == 0:
                     print(
@@ -624,8 +698,8 @@ def train(args):
             if train_samples == 0:
                 raise RuntimeError("No valid training samples were loaded in this epoch.")
 
-            avg_train_loss = train_loss / train_batches
-            avg_train_components = _average_loss_sums(train_loss_sums, train_batches)
+            avg_train_loss = train_loss / train_samples
+            avg_train_components = _average_loss_sums(train_loss_sums, train_samples)
             avg_train_mae = train_mae_sum / train_samples
             
             # --- 2. 验证 (Validation) ---
@@ -684,8 +758,10 @@ def train(args):
                 # 如果用了 EMA，保存 EMA 后的权重为 best_model.pth
                 if ema:
                     ema.apply_shadow()
-                    save_model_package(model, best_model_path, training_metadata)
-                    ema.restore()
+                    try:
+                        save_model_package(model, best_model_path, training_metadata)
+                    finally:
+                        ema.restore()
                 else:
                     save_model_package(model, best_model_path, training_metadata)
                     
@@ -733,6 +809,7 @@ def train(args):
                 'scheduler_state_dict': scheduler.state_dict(), 
                 'best_mae': best_mae,
                 'metadata': training_metadata,
+                **checkpoint_extra_state(scheduler_controller, scaler),
             }
             if ema:
                 checkpoint_dict['ema_state_dict'] = ema.shadow
@@ -798,7 +875,7 @@ if __name__ == "__main__":
         print(f"\n🚀 Starting subprocess for seed {seed}...")
         # Use sys.executable to ensure we use the same python interpreter
         # Use sys.argv[0] to refer to this script (train.py)
-        cmd = [sys.executable, sys.argv[0], "--seed", str(seed)]
+        cmd = [sys.executable, sys.argv[0], "--seed", str(seed), "--split_file_tag", "formal_v1"]
         
         # Pass through other common args if needed, or enforce defaults for benchmarks
         # For 'Run All', we usually want standard settings, so we just pass seed.
@@ -822,8 +899,10 @@ if __name__ == "__main__":
             
         # Fallback check file
         if mae is None:
+            fallback_cfg = Config()
+            fallback_cfg.split_file_tag = "formal_v1"
             result_candidates = [
-                artifact_path(ROOT_DIR, "final_result", Config(), seed, ".txt"),
+                artifact_path(ROOT_DIR, "final_result", fallback_cfg, seed, ".txt"),
                 os.path.join(ROOT_DIR, f"final_result_seed{seed}.txt"),
             ]
             for result_file in result_candidates:
@@ -966,9 +1045,9 @@ if __name__ == "__main__":
     print("="*60)
     print("🎮 FADE-Net Interactive Training Launcher")
     print("="*60)
-    print("1. [Default]  Run Standard Benchmark (Seed 42, 72-8-20)")
-    print("2. [Seed]     Run 2026 Academic Seed (Seed 2026, 72-8-20)")
-    print("3. [Batch]    Run Academic Seeds (42, 3407, 2026)")
+    print("1. [Default]  Run Standard Benchmark (Seed 42, 72-8-20, formal_v1)")
+    print("2. [Seed]     Run 2026 Academic Seed (Seed 2026, 72-8-20, formal_v1)")
+    print("3. [Batch]    Run Academic Seeds (42, 3407, 2026, formal_v1)")
     print("4. [Custom]   Configure Manually")
     print("q. [Quit]     Exit")
     print("-" * 60)
@@ -997,7 +1076,7 @@ if __name__ == "__main__":
                 max_val_batches = None
                 max_test_batches = None
                 experiment_tag = None
-                split_file_tag = None
+                split_file_tag = "formal_v1"
             train(Args())
             
         elif choice == '2':
@@ -1020,7 +1099,7 @@ if __name__ == "__main__":
                 max_val_batches = None
                 max_test_batches = None
                 experiment_tag = None
-                split_file_tag = None
+                split_file_tag = "formal_v1"
             train(Args())
 
         elif choice == '3':
@@ -1079,7 +1158,7 @@ if __name__ == "__main__":
                 max_val_batches=None,
                 max_test_batches=None,
                 experiment_tag=None,
-                split_file_tag=None,
+                split_file_tag="formal_v1",
             ))
             
         elif choice == 'q':

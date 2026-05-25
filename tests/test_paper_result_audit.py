@@ -20,6 +20,8 @@ from experiment import artifact_path, build_training_metadata
 from audit_paper_results import (
     apply_ablation_profile,
     audit_candidate,
+    load_checkpoint_metadata,
+    load_split_payload,
     parse_ablation_ids,
     parse_seeds,
     populate_runtime_model_metadata,
@@ -129,6 +131,7 @@ class PaperResultAuditTests(unittest.TestCase):
             row = audit_candidate(Path(tmpdir), cfg, seed=42, ablation_id="A3")
 
         self.assertEqual("paper-ready", row["status"])
+        self.assertEqual("single-row evidence; not final mean/std paper table", row["scope"])
         self.assertEqual("formal_v1", row["split_file_tag"])
         self.assertEqual("formal_v1", metadata["split_file_tag"])
         self.assertEqual("A3", row["ablation_id"])
@@ -168,7 +171,7 @@ class PaperResultAuditTests(unittest.TestCase):
 
             for kind in ("best_model", "last_checkpoint"):
                 checkpoint_path = Path(artifact_path(str(tmpdir), kind, cfg, 42, ".pth"))
-                checkpoint = torch.load(checkpoint_path, map_location="cpu")
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
                 checkpoint["metadata"] = dict(checkpoint["metadata"])
                 checkpoint["metadata"]["loss"] = dict(checkpoint["metadata"]["loss"])
                 checkpoint["metadata"]["loss"]["lambda_mv"] = 999
@@ -187,7 +190,7 @@ class PaperResultAuditTests(unittest.TestCase):
 
             for kind in ("best_model", "last_checkpoint"):
                 checkpoint_path = Path(artifact_path(str(tmpdir), kind, cfg, 42, ".pth"))
-                checkpoint = torch.load(checkpoint_path, map_location="cpu")
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
                 checkpoint["metadata"] = dict(checkpoint["metadata"])
                 checkpoint["metadata"]["backbone"] = dict(checkpoint["metadata"]["backbone"])
                 checkpoint["metadata"]["backbone"]["effective_msff_channels"] = [1, 2]
@@ -229,8 +232,49 @@ class PaperResultAuditTests(unittest.TestCase):
 
             content = output.read_text(encoding="utf-8")
 
-        self.assertIn("status,reasons", content)
-        self.assertIn("blocked,missing result", content)
+        self.assertIn("status,scope,reasons", content)
+        self.assertIn("blocked,,missing result", content)
+
+    def test_load_checkpoint_metadata_uses_weights_only_when_available(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+            checkpoint_path.write_bytes(b"placeholder")
+            calls = []
+
+            def fake_load(path, **kwargs):
+                calls.append((path, kwargs))
+                return {"model_state_dict": {}, "metadata": {"experiment_id": "safe"}}
+
+            with unittest.mock.patch("audit_paper_results.torch.load", side_effect=fake_load):
+                metadata, error = load_checkpoint_metadata(checkpoint_path)
+
+        self.assertIsNone(error)
+        self.assertEqual({"experiment_id": "safe"}, metadata)
+        self.assertTrue(calls[0][1]["weights_only"])
+
+    def test_load_split_payload_rejects_paths_outside_root(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "root"
+            root.mkdir()
+            outside = Path(tmpdir) / "outside.json"
+            outside.write_text(json.dumps({"_metadata": {}}), encoding="utf-8")
+            reasons = []
+
+            split_path, payload = load_split_payload(root, "../outside.json", reasons)
+
+        self.assertIsNone(split_path)
+        self.assertIsNone(payload)
+        self.assertIn("outside project root", "; ".join(reasons))
+
+    def test_write_audit_refuses_to_overwrite_without_flag(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "audit.csv"
+            output.write_text("existing", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError):
+                write_audit([{"status": "blocked"}], output)
+
+            self.assertEqual("existing", output.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

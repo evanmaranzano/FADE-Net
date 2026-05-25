@@ -9,7 +9,7 @@
 
 ## 项目概述
 
-**FADE-Net**（前身 HAL-Net）是一个面向资源受限场景的轻量级面部年龄估计框架。项目基于 MobileNetV4-Small 骨干网络，集成了 10 个可独立开关的创新模块，通过 CLI 标志灵活组合，支持系统性消融实验。
+**FADE-Net**（前身 HAL-Net）是一个面向资源受限场景的轻量级面部年龄估计框架。项目基于 MobileNetV4-Small 骨干网络，提供骨干适配器和多组可配置组件，通过 CLI 标志灵活组合，支持系统性消融实验。
 
 **命名含义：**
 - **F**eature-fused -- 纹理 + 语义双流特征融合
@@ -17,13 +17,13 @@
 - **D**istribution -- 自适应 Sigma DLDL-v2 分布学习
 - **E**stimation -- 鲁棒年龄推理
 
-**当前协议：** AFAD-Full 数据集，72-8-20 分层划分（formal_v1 tag），3 seeds（42, 3407, 2026）报告 mean +/- std。主指标为最终结果文件中的 `Selected_Test_MAE`。
+**当前协议：** AFAD-Full 数据集，72-8-20 分层划分（formal_v1 tag），目标以 3 seeds（42, 3407, 2026）报告 mean +/- std。主指标为最终结果文件中的 `Selected_Test_MAE`；最终主表仍需完整训练与审计结果支撑。
 
 ---
 
 ## 模块架构
 
-FADE-Net 由 10 个模块组成，全部可通过配置开关独立启停：
+FADE-Net 由 1 个默认骨干和 9 个主要可配置组件组成，用于受控消融：
 
 | 编号 | 模块 | 缩写 | CLI 标志 | 默认状态 | 说明 |
 |:--:|:--|:--|:--|:--:|:--|
@@ -38,7 +38,7 @@ FADE-Net 由 10 个模块组成，全部可通过配置开关独立启停：
 | 8 | 频域通道注意力 | FREQ (M4) | `--freq` | 禁用 | DCT 频域注意力 |
 | 9 | 年龄感知混合专家头 | MOE (M5) | `--moe` | 禁用 | 多专家门控 |
 
-> 注：Hybrid Attention (CoordAtt) 仅对 torchvision 骨干有效，MobileNetV4 已内置高效注意力机制，无需额外注入。
+> 注：Hybrid Attention (CoordAtt) 仅对 legacy torchvision 骨干有效；默认 MobileNetV4/timm 路径使用骨干自带注意力，不应把 CoordAtt 计作默认新增模块。
 
 ---
 
@@ -47,8 +47,8 @@ FADE-Net 由 10 个模块组成，全部可通过配置开关独立启停：
 ```
 FADE-Net/
 ├── src/                          # 核心源码
-│   ├── config.py                 # 配置（10 个模块开关、骨干适配器、超参数）
-│   ├── model.py                  # FADE-Net 模型架构（全部 10 个模块）
+│   ├── config.py                 # 配置（骨干适配器、模块开关、超参数）
+│   ├── model.py                  # FADE-Net 模型架构
 │   ├── train.py                  # 训练循环（实验管理、EMA、AMP、CLI 入口）
 │   ├── dataset.py                # AFAD 数据集加载器（DLDL 标签分布、LDS、重试逻辑）
 │   ├── utils.py                  # 损失函数（CombinedLoss、EMA、种子管理）
@@ -103,18 +103,18 @@ AFAD 数据集放置于 `datasets/AFAD/` 目录（可通过环境变量 `FADE_NE
 
 ```bash
 # 默认配置（MobileNetV4-Small + DLDL + MSFF + SPP + MV）
-python src/train.py --seed 42 --split 72-8-20 --fresh
+python src/train.py --seed 42 --split 72-8-20 --split_file_tag formal_v1 --fresh
 
 # 启用全部创新模块
-python src/train.py --seed 42 --split 72-8-20 --fresh --texture --freq --moe --triplet --asym
+python src/train.py --seed 42 --split 72-8-20 --split_file_tag formal_v1 --fresh --texture --freq --moe --triplet --asym
 
 # 消融实验：禁用特定模块
-python src/train.py --seed 42 --split 72-8-20 --fresh --no-msff --no-spp
+python src/train.py --seed 42 --split 72-8-20 --split_file_tag formal_v1 --fresh --no-msff --no-spp
 
 # 多种子复现
-python src/train.py --seed 42   --split 72-8-20 --fresh
-python src/train.py --seed 3407 --split 72-8-20 --fresh
-python src/train.py --seed 2026 --split 72-8-20 --fresh
+python src/train.py --seed 42   --split 72-8-20 --split_file_tag formal_v1 --fresh
+python src/train.py --seed 3407 --split 72-8-20 --split_file_tag formal_v1 --fresh
+python src/train.py --seed 2026 --split 72-8-20 --split_file_tag formal_v1 --fresh
 ```
 
 主要训练参数：
@@ -178,7 +178,7 @@ python src/gui_demo.py
 
 ## 核心特性
 
-**可切换创新模块：** 10 个模块通过 CLI 标志独立控制，支持任意组合的消融实验。实验命名自动根据启用模块生成（如 `FADE-Net_DLDL_MSFF_SPP_MV_TEX_FREQ`）。
+**可配置组件：** 骨干与非骨干组件通过 CLI 标志控制，支持受控消融实验。实验命名自动根据有效启用模块生成（如 `FADE-Net_DLDL_MSFF_SPP_MV_TEX_FREQ`）。
 
 **实验管理系统：** 基于 metadata fingerprint 的实验追踪，自动检测配置冲突，防止意外覆盖已有结果。
 
@@ -214,7 +214,7 @@ python src/gui_demo.py
 1. **当前主协议**：AFAD 72-8-20 分层划分，formal_v1 tag。所有正式结果必须基于此协议。
 2. **历史结果**：README 中的历史 MAE（如 ~3.057）来自旧 split/protocol，仅作参考，需按当前协议重跑后才能写入论文主表。
 3. **骨干变更**：默认 backbone 已从 MobileNetV3-Large 切换为 MobileNetV4-Small（timm 2024 架构）。Hybrid Attention (CoordAtt) 对 timm 骨干不适用。
-4. **结果审计**：所有写入论文的结果必须通过 `scripts/audit_paper_results.py` 审计，确保 split、seed、TTA 口径和 checkpoint 元数据一致。
+4. **结果审计**：所有写入论文的结果行必须通过 `scripts/audit_paper_results.py` 审计，确保 split、seed、TTA 口径和 checkpoint 元数据一致；`paper-ready` 只表示单行证据链通过，最终 mean/std 主表仍需 `scripts/summarize_paper_results.py` 标记为 `complete`。
 5. **实验覆盖保护**：同一实验 ID 的产物（checkpoint、日志、最终结果）已存在时，需显式使用 `--overwrite_artifacts` 才能覆盖。
 
 ---

@@ -36,6 +36,7 @@ AUDIT_FIELDS = [
     "split",
     "split_file_tag",
     "status",
+    "scope",
     "reasons",
     "selected_test_mae",
     "mae_raw",
@@ -75,7 +76,10 @@ def config_for_candidate(args, source, name):
 def load_checkpoint_metadata(path):
     if not path.is_file():
         return None, f"missing checkpoint: {path}"
-    checkpoint = torch.load(path, map_location="cpu")
+    try:
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(path, map_location="cpu")
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         return None, f"not a packaged checkpoint: {path}"
     metadata = checkpoint.get("metadata")
@@ -101,7 +105,17 @@ def load_split_payload(root_dir, split_file, reasons):
         reasons.append("missing split_file in checkpoint metadata")
         return None, None
 
-    split_path = Path(root_dir) / split_file
+    root_path = Path(root_dir).resolve()
+    split_rel = Path(split_file)
+    if split_rel.is_absolute():
+        reasons.append(f"split file outside project root: {split_file}")
+        return None, None
+    split_path = (root_path / split_rel).resolve()
+    try:
+        split_path.relative_to(root_path)
+    except ValueError:
+        reasons.append(f"split file outside project root: {split_file}")
+        return None, None
     if not split_path.is_file():
         reasons.append(f"missing split file: {split_path}")
         return None, None
@@ -223,6 +237,7 @@ def audit_candidate(root_dir, cfg, seed, ablation_id=""):
         "split": cfg.split_protocol,
         "split_file_tag": split_file_tag or "",
         "status": "paper-ready" if not reasons else "blocked",
+        "scope": "single-row evidence; not final mean/std paper table",
         "reasons": "; ".join(reasons),
         "selected_test_mae": metrics.get("selected_test_mae", ""),
         "mae_raw": metrics.get("mae_raw", ""),
@@ -241,7 +256,10 @@ def audit_candidate(root_dir, cfg, seed, ablation_id=""):
     }
 
 
-def write_audit(rows, output_path):
+def write_audit(rows, output_path, overwrite=False):
+    output_path = Path(output_path)
+    if output_path.exists() and not overwrite:
+        raise FileExistsError(f"Refusing to overwrite existing audit file: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=AUDIT_FIELDS)
@@ -260,6 +278,7 @@ def main():
     parser.add_argument("--split_file_tag", type=str, help="Audit tagged split file/artifact identity")
     parser.add_argument("--ablation_id", type=str, help="Comma-separated ablation ids to audit, e.g. A0,A3,A9")
     parser.add_argument("--output", type=str, default=str(ROOT_DIR / "docs" / "paper_result_audit.csv"))
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing audit CSV")
     args = parser.parse_args()
 
     rows = []
@@ -271,7 +290,7 @@ def main():
                 rows.append(audit_candidate(ROOT_DIR, cfg, seed, ablation_id=ablation_id or ""))
 
     output_path = Path(args.output)
-    write_audit(rows, output_path)
+    write_audit(rows, output_path, overwrite=args.overwrite)
     print(f"Audit written: {output_path}")
 
 

@@ -41,12 +41,39 @@ def _list_value(value: Any) -> list[Any]:
     return [value]
 
 
+DEFAULT_IMAGE_MEAN = [0.485, 0.456, 0.406]
+DEFAULT_IMAGE_STD = [0.229, 0.224, 0.225]
+LEGACY_HEAD_VERSION = "fade-head-v1"
+DEFAULT_HEAD_VERSION = "fade-head-v2"
+
+
+def hard_distillation_start_epoch(total_epochs: int, default_start: int = 105, tail_epochs: int = 15) -> int:
+    return min(default_start, max(0, total_epochs - tail_epochs))
+
+
+def hard_distillation_schedule_metadata(total_epochs: int) -> dict[str, Any]:
+    return {
+        "start_epoch": hard_distillation_start_epoch(total_epochs),
+        "disables_mixup": True,
+        "disables_sigma_jitter": True,
+        "uses_eval_transform": True,
+    }
+
+
+def regularization_schedule_signature(config) -> dict[str, Any]:
+    if hasattr(config, "regularization_schedule"):
+        return getattr(config, "regularization_schedule")
+    return {
+        "hard_distillation": hard_distillation_schedule_metadata(getattr(config, "epochs", 120)),
+    }
+
+
 def backbone_signature(config) -> dict[str, Any]:
     return {
         "source": getattr(config, "backbone_source", "torchvision"),
         "name": getattr(config, "backbone_name", "mobilenet_v3_large"),
         "pretrained": bool(getattr(config, "backbone_pretrained", True)),
-        "effective_pretrained": bool(getattr(config, "backbone_pretrained", True)),
+        "effective_pretrained": bool(getattr(config, "effective_pretrained", getattr(config, "backbone_pretrained", True))),
         "msff_feature_indices": _list_value(getattr(config, "msff_feature_indices", (6, 12))),
         "effective_msff_feature_indices": _list_value(
             getattr(config, "effective_msff_feature_indices", getattr(config, "msff_feature_indices", (6, 12)))
@@ -54,7 +81,7 @@ def backbone_signature(config) -> dict[str, Any]:
         "effective_msff_channels": _list_value(getattr(config, "effective_msff_channels", [])),
         "effective_msff_spatial": _list_value(getattr(config, "effective_msff_spatial", [])),
         "effective_deep_channels": getattr(config, "effective_deep_channels", None),
-        "head_version": getattr(config, "head_version", "fade-head-v1"),
+        "head_version": getattr(config, "head_version", DEFAULT_HEAD_VERSION),
     }
 
 
@@ -87,6 +114,7 @@ def loss_signature(config) -> dict[str, Any]:
         "lambda_triplet": getattr(config, "lambda_triplet", None),
         "triplet_base_margin": getattr(config, "triplet_base_margin", None),
         "triplet_alpha": getattr(config, "triplet_alpha", None),
+        "triplet_max_margin": getattr(config, "triplet_max_margin", None),
         "triplet_age_threshold": getattr(config, "triplet_age_threshold", None),
         "lambda_asym": getattr(config, "lambda_asym", None),
         "asym_under_weight": getattr(config, "asym_under_weight", None),
@@ -95,6 +123,7 @@ def loss_signature(config) -> dict[str, Any]:
         "moe_num_experts": getattr(config, "moe_num_experts", None),
         "moe_hidden_dim": getattr(config, "moe_hidden_dim", None),
         "lambda_moe_gate": getattr(config, "lambda_moe_gate", None),
+        "lambda_moe_balance": getattr(config, "lambda_moe_balance", None),
         "use_reweighting": bool(getattr(config, "use_reweighting", False)),
         "lds_sigma": getattr(config, "lds_sigma", None),
     }
@@ -102,6 +131,8 @@ def loss_signature(config) -> dict[str, Any]:
 
 def augmentation_signature(config) -> dict[str, Any]:
     return {
+        "image_mean": _list_value(getattr(config, "image_mean", DEFAULT_IMAGE_MEAN)),
+        "image_std": _list_value(getattr(config, "image_std", DEFAULT_IMAGE_STD)),
         "use_mixup": bool(getattr(config, "use_mixup", False)),
         "mixup_alpha": getattr(config, "mixup_alpha", None),
         "mixup_prob": getattr(config, "mixup_prob", None),
@@ -139,6 +170,7 @@ def build_training_metadata(config, seed: int, split_metadata: dict[str, Any] | 
         "experiment_tag": getattr(config, "experiment_tag", None),
         "split_file_tag": optional_sanitize_token(getattr(config, "split_file_tag", None)),
         "seed": seed,
+        "epochs": getattr(config, "epochs", None),
         "project_name": getattr(config, "project_name", None),
         "split_protocol": getattr(config, "split_protocol", None),
         "split_file": split_metadata.get("split_file"),
@@ -153,6 +185,7 @@ def build_training_metadata(config, seed: int, split_metadata: dict[str, Any] | 
         "ablations": ablation_signature(config),
         "loss": loss_signature(config),
         "augmentation": augmentation_signature(config),
+        "regularization_schedule": regularization_schedule_signature(config),
         "reported_tta_modes": ["raw", "flip", "multi"],
         "selection_metric": {
             "split": "val",
@@ -177,42 +210,124 @@ def _intersection_dict_eq(a: Any, b: Any) -> bool:
     return all(a[k] == b[k] for k in shared_keys)
 
 
+def _expected_keys_dict_eq(actual: Any, expected: Any) -> bool:
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return actual == expected
+    if not set(expected).issubset(set(actual)):
+        return False
+    return all(actual[k] == expected[k] for k in expected)
+
+
+def _augmentation_dict_eq(actual: Any, expected: Any) -> bool:
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return actual == expected
+    actual = {
+        "image_mean": DEFAULT_IMAGE_MEAN,
+        "image_std": DEFAULT_IMAGE_STD,
+        **actual,
+    }
+    expected = {
+        "image_mean": DEFAULT_IMAGE_MEAN,
+        "image_std": DEFAULT_IMAGE_STD,
+        **expected,
+    }
+    return _intersection_dict_eq(actual, expected)
+
+
+def _backbone_dict_eq(actual: Any, expected: Any, ignored_keys: tuple[str, ...] = ()) -> bool:
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return actual == expected
+    actual = {"head_version": LEGACY_HEAD_VERSION, **actual}
+    expected = {"head_version": DEFAULT_HEAD_VERSION, **expected}
+    for key in ignored_keys:
+        actual.pop(key, None)
+        expected.pop(key, None)
+    return _expected_keys_dict_eq(actual, expected)
+
+
+def _regularization_schedule_eq(actual: Any, expected: Any, expected_epochs: int | None = None) -> bool:
+    if actual is None:
+        legacy_compatible_expected = (
+            {},
+            {"hard_distillation": hard_distillation_schedule_metadata(expected_epochs or 120)},
+        )
+        return expected in legacy_compatible_expected
+    return actual == expected
+
+
+METADATA_KEYS = (
+    "experiment_id",
+    "experiment_tag",
+    "split_file_tag",
+    "project_name",
+    "split_protocol",
+    "split_file",
+    "split_fingerprint",
+    "dataset_fingerprint",
+    "legacy_split_upgraded",
+    "img_size",
+    "num_classes",
+    "min_age",
+    "max_age",
+    "backbone",
+    "ablations",
+    "loss",
+    "augmentation",
+    "regularization_schedule",
+    "reported_tta_modes",
+    "selection_metric",
+)
+
+INFERENCE_IGNORED_METADATA_KEYS = (
+    "experiment_id",
+    "split_file_tag",
+    "split_file",
+    "split_fingerprint",
+    "dataset_fingerprint",
+    "legacy_split_upgraded",
+)
+
+
 def checkpoint_metadata_mismatches(
     checkpoint: dict[str, Any],
     expected_metadata: dict[str, Any],
     keys: tuple[str, ...] | None = None,
+    ignored_backbone_keys: tuple[str, ...] = (),
 ) -> list[tuple[str, Any, Any]]:
     metadata = checkpoint.get("metadata", {}) if isinstance(checkpoint, dict) else {}
-    keys = keys or (
-        "experiment_id",
-        "experiment_tag",
-        "split_file_tag",
-        "project_name",
-        "split_protocol",
-        "split_file",
-        "split_fingerprint",
-        "dataset_fingerprint",
-        "legacy_split_upgraded",
-        "img_size",
-        "num_classes",
-        "min_age",
-        "max_age",
-        "backbone",
-        "ablations",
-        "loss",
-        "reported_tta_modes",
-        "selection_metric",
-    )
+    keys = keys or METADATA_KEYS
     mismatches = []
     for key in keys:
         actual = metadata.get(key)
         expected = expected_metadata.get(key)
-        if key in ("backbone", "ablations", "loss"):
-            if not _intersection_dict_eq(actual, expected):
+        if key == "augmentation":
+            if not _augmentation_dict_eq(actual, expected):
+                mismatches.append((key, actual, expected))
+        elif key == "backbone":
+            if not _backbone_dict_eq(actual, expected, ignored_keys=ignored_backbone_keys):
+                mismatches.append((key, actual, expected))
+        elif key in ("ablations", "loss"):
+            if not _expected_keys_dict_eq(actual, expected):
+                mismatches.append((key, actual, expected))
+        elif key == "regularization_schedule":
+            if not _regularization_schedule_eq(actual, expected, expected_metadata.get("epochs")):
                 mismatches.append((key, actual, expected))
         elif actual != expected:
             mismatches.append((key, actual, expected))
     return mismatches
+
+
+def inference_checkpoint_metadata_mismatches(
+    checkpoint: dict[str, Any],
+    expected_metadata: dict[str, Any],
+) -> list[tuple[str, Any, Any]]:
+    keys = tuple(key for key in METADATA_KEYS if key not in INFERENCE_IGNORED_METADATA_KEYS)
+    return checkpoint_metadata_mismatches(
+        checkpoint,
+        expected_metadata,
+        keys=keys,
+        ignored_backbone_keys=("effective_pretrained",),
+    )
 
 
 def save_model_package(model, path: str, metadata: dict[str, Any]) -> None:
@@ -220,7 +335,10 @@ def save_model_package(model, path: str, metadata: dict[str, Any]) -> None:
 
 
 def load_model_state_package(path: str, device):
-    checkpoint = torch.load(path, map_location=device)
+    try:
+        checkpoint = torch.load(path, map_location=device, weights_only=True)
+    except TypeError:
+        checkpoint = torch.load(path, map_location=device)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         return checkpoint["model_state_dict"], checkpoint
     return checkpoint, {"metadata": {}}
@@ -242,7 +360,19 @@ def is_compatible_checkpoint(path: str, config, seed: int, device="cpu"):
     return True, ""
 
 
-def compatible_best_model_paths(root_dir: str, config, seed: int = 42, device="cpu"):
+def is_inference_compatible_checkpoint(path: str, config, seed: int, device="cpu"):
+    try:
+        _state_dict, checkpoint = load_model_state_package(path, device)
+    except Exception as exc:
+        return False, f"load failed: {exc}"
+    expected_metadata = build_training_metadata(config, seed)
+    mismatches = inference_checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+    if mismatches:
+        return False, format_metadata_mismatches(mismatches)
+    return True, ""
+
+
+def _best_model_candidates(root_dir: str, config, seed: int):
     exact_path = artifact_path(root_dir, "best_model", config, seed, ".pth")
     candidates = []
     if os.path.exists(exact_path):
@@ -253,11 +383,26 @@ def compatible_best_model_paths(root_dir: str, config, seed: int = 42, device="c
             continue
         if name.startswith("best_model_") and name.endswith(".pth") and os.path.isfile(path):
             candidates.append(path)
+    return candidates
 
+
+def compatible_best_model_paths(root_dir: str, config, seed: int = 42, device="cpu"):
     compatible = []
     incompatible = []
-    for path in candidates:
+    for path in _best_model_candidates(root_dir, config, seed):
         ok, reason = is_compatible_checkpoint(path, config, seed, device=device)
+        if ok:
+            compatible.append(path)
+        else:
+            incompatible.append((path, reason))
+    return compatible, incompatible
+
+
+def inference_compatible_best_model_paths(root_dir: str, config, seed: int = 42, device="cpu"):
+    compatible = []
+    incompatible = []
+    for path in _best_model_candidates(root_dir, config, seed):
+        ok, reason = is_inference_compatible_checkpoint(path, config, seed, device=device)
         if ok:
             compatible.append(path)
         else:

@@ -8,9 +8,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.config import Config
 from src.model import LightweightAgeEstimator
+from src.ablation_profiles import apply_ablation_profile, parse_ablation_ids
 from thop import profile, clever_format
 
 def apply_common_overrides(cfg, args):
+    apply_ablation_profile(cfg, getattr(args, "ablation_id", None))
     if args.backbone_source is not None:
         cfg.backbone_source = args.backbone_source
     if args.backbone_name is not None:
@@ -24,6 +26,7 @@ def main():
     parser.add_argument('--backbone_source', type=str, choices=['torchvision', 'timm'], help='Backbone provider')
     parser.add_argument('--backbone_name', type=str, help='Backbone model name')
     parser.add_argument('--no_pretrained', action='store_true', help='Disable pretrained backbone weights')
+    parser.add_argument('--ablation_id', type=str, choices=[item for item in parse_ablation_ids("A0,A1,A2,A3,A4,A5,A6,A7,A8,A9")], help='Apply an A0-A9 ablation profile')
     args = parser.parse_args()
 
     cfg = Config()

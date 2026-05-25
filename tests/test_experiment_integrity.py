@@ -28,11 +28,13 @@ from experiment import (
     build_training_metadata,
     checkpoint_metadata_mismatches,
     compatible_best_model_paths,
+    inference_checkpoint_metadata_mismatches,
     is_compatible_checkpoint,
 )
 from advanced_eval import evaluate_uncertainty
 from swa_average import average_checkpoints, discover_checkpoint_seeds
 from train import _guard_fresh_artifact_overwrite, amp_step_was_skipped, make_grad_scaler, parse_selected_test_mae
+from train import hard_distillation_schedule_metadata
 
 
 class ConstantLogitModel(torch.nn.Module):
@@ -297,6 +299,204 @@ class ExperimentIntegrityTests(unittest.TestCase):
 
         self.assertNotEqual(full_path, triplet_path)
         self.assertNotEqual(full_path, asym_path)
+
+    def test_image_normalization_is_recorded_and_checked_in_metadata(self):
+        cfg_default = self.make_config()
+        cfg_custom = self.make_config()
+        cfg_custom.image_mean = [0.1, 0.2, 0.3]
+        cfg_custom.image_std = [0.4, 0.5, 0.6]
+
+        default_meta = build_training_metadata(cfg_default, seed=42)
+        custom_meta = build_training_metadata(cfg_custom, seed=42)
+
+        self.assertEqual([0.485, 0.456, 0.406], default_meta["augmentation"]["image_mean"])
+        self.assertEqual([0.229, 0.224, 0.225], default_meta["augmentation"]["image_std"])
+        self.assertEqual([0.1, 0.2, 0.3], custom_meta["augmentation"]["image_mean"])
+        self.assertEqual([0.4, 0.5, 0.6], custom_meta["augmentation"]["image_std"])
+
+        mismatches = checkpoint_metadata_mismatches({"metadata": default_meta}, custom_meta)
+        self.assertIn("augmentation", {key for key, _, _ in mismatches})
+
+    def test_missing_normalization_metadata_is_default_only_compatible(self):
+        cfg_default = self.make_config()
+        cfg_custom = self.make_config()
+        cfg_custom.image_mean = [0.1, 0.2, 0.3]
+        cfg_custom.image_std = [0.4, 0.5, 0.6]
+
+        legacy_meta = build_training_metadata(cfg_default, seed=42)
+        legacy_meta["augmentation"].pop("image_mean")
+        legacy_meta["augmentation"].pop("image_std")
+
+        default_mismatches = checkpoint_metadata_mismatches(
+            {"metadata": legacy_meta},
+            build_training_metadata(cfg_default, seed=42),
+        )
+        custom_mismatches = checkpoint_metadata_mismatches(
+            {"metadata": legacy_meta},
+            build_training_metadata(cfg_custom, seed=42),
+        )
+
+        self.assertNotIn("augmentation", {key for key, _, _ in default_mismatches})
+        self.assertIn("augmentation", {key for key, _, _ in custom_mismatches})
+
+    def test_model_weight_schema_changes_are_versioned_in_metadata(self):
+        cfg = self.make_config()
+        expected = build_training_metadata(cfg, seed=42)
+        legacy_meta = build_training_metadata(cfg, seed=42)
+        legacy_meta["experiment_id"] = expected["experiment_id"]
+        legacy_meta["backbone"]["head_version"] = "fade-head-v1"
+
+        self.assertNotEqual("fade-head-v1", expected["backbone"]["head_version"])
+        mismatches = checkpoint_metadata_mismatches({"metadata": legacy_meta}, expected)
+        self.assertIn("backbone", {key for key, _, _ in mismatches})
+
+        missing_version_meta = build_training_metadata(cfg, seed=42)
+        missing_version_meta["experiment_id"] = expected["experiment_id"]
+        missing_version_meta["backbone"].pop("head_version")
+        missing_version_mismatches = checkpoint_metadata_mismatches({"metadata": missing_version_meta}, expected)
+        self.assertIn("backbone", {key for key, _, _ in missing_version_mismatches})
+
+    def test_missing_required_nested_metadata_keys_are_mismatches(self):
+        cfg = self.make_config()
+        expected = build_training_metadata(cfg, seed=42)
+        missing_loss_meta = build_training_metadata(cfg, seed=42)
+        missing_loss_meta["loss"].pop("lambda_moe_balance")
+        missing_ablation_meta = build_training_metadata(cfg, seed=42)
+        missing_ablation_meta["ablations"].pop("use_freq_attention")
+        missing_backbone_meta = build_training_metadata(cfg, seed=42)
+        missing_backbone_meta["backbone"].pop("effective_pretrained")
+
+        loss_mismatches = checkpoint_metadata_mismatches({"metadata": missing_loss_meta}, expected)
+        ablation_mismatches = checkpoint_metadata_mismatches({"metadata": missing_ablation_meta}, expected)
+        backbone_mismatches = checkpoint_metadata_mismatches({"metadata": missing_backbone_meta}, expected)
+
+        self.assertIn("loss", {key for key, _, _ in loss_mismatches})
+        self.assertIn("ablations", {key for key, _, _ in ablation_mismatches})
+        self.assertIn("backbone", {key for key, _, _ in backbone_mismatches})
+
+    def test_inference_metadata_can_ignore_split_and_effective_pretraining_provenance(self):
+        train_cfg = self.make_config()
+        train_cfg.split_file_tag = "formal_v1"
+        train_cfg.effective_pretrained = False
+        train_cfg.split_metadata = {
+            "split_file": "dataset_split_AFAD_72_8_20_formal_v1.json",
+            "fingerprint": "split-hash",
+            "dataset_fingerprint": "dataset-hash",
+        }
+        demo_cfg = self.make_config()
+        demo_cfg.effective_pretrained = True
+
+        mismatches = inference_checkpoint_metadata_mismatches(
+            {"metadata": build_training_metadata(train_cfg, seed=42)},
+            build_training_metadata(demo_cfg, seed=42),
+        )
+
+        self.assertEqual([], mismatches)
+
+    def test_regularization_schedule_is_recorded_in_metadata(self):
+        cfg = self.make_config()
+        cfg.regularization_schedule = {
+            "hard_distillation": {
+                "start_epoch": 105,
+                "disables_mixup": True,
+                "disables_sigma_jitter": True,
+                "uses_eval_transform": True,
+            }
+        }
+
+        metadata = build_training_metadata(cfg, seed=42)
+
+        self.assertEqual(cfg.regularization_schedule, metadata["regularization_schedule"])
+
+    def test_default_regularization_schedule_matches_training_schedule(self):
+        cfg = self.make_config()
+        expected_schedule = {
+            "hard_distillation": hard_distillation_schedule_metadata(cfg.epochs),
+        }
+
+        metadata = build_training_metadata(cfg, seed=42)
+
+        self.assertEqual(expected_schedule, metadata["regularization_schedule"])
+
+    def test_demo_expected_metadata_accepts_training_default_regularization_schedule(self):
+        train_cfg = self.make_config()
+        demo_cfg = self.make_config()
+        train_cfg.regularization_schedule = {
+            "hard_distillation": hard_distillation_schedule_metadata(train_cfg.epochs),
+        }
+        checkpoint = {"metadata": build_training_metadata(train_cfg, seed=42)}
+        expected_metadata = build_training_metadata(demo_cfg, seed=42)
+
+        mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+
+        self.assertNotIn("regularization_schedule", {key for key, _, _ in mismatches})
+
+    def test_regularization_schedule_drift_is_a_metadata_mismatch(self):
+        cfg_a = self.make_config()
+        cfg_b = self.make_config()
+        cfg_a.regularization_schedule = {
+            "hard_distillation": {
+                "start_epoch": 105,
+                "disables_mixup": True,
+                "disables_sigma_jitter": True,
+                "uses_eval_transform": True,
+            }
+        }
+        cfg_b.regularization_schedule = {
+            "hard_distillation": {
+                "start_epoch": 85,
+                "disables_mixup": True,
+                "disables_sigma_jitter": True,
+                "uses_eval_transform": True,
+            }
+        }
+
+        mismatches = checkpoint_metadata_mismatches(
+            {"metadata": build_training_metadata(cfg_a, seed=42)},
+            build_training_metadata(cfg_b, seed=42),
+        )
+
+        self.assertIn("regularization_schedule", {key for key, _, _ in mismatches})
+
+    def test_missing_regularization_schedule_is_compatible_with_default_only(self):
+        cfg_default = self.make_config()
+        default_meta = build_training_metadata(cfg_default, seed=42)
+        default_meta.pop("regularization_schedule")
+
+        default_mismatches = checkpoint_metadata_mismatches(
+            {"metadata": default_meta},
+            build_training_metadata(cfg_default, seed=42),
+        )
+
+        cfg_scheduled = self.make_config()
+        cfg_scheduled.regularization_schedule = {
+            "hard_distillation": {
+                "start_epoch": 85,
+                "disables_mixup": True,
+                "disables_sigma_jitter": True,
+                "uses_eval_transform": True,
+            }
+        }
+        scheduled_mismatches = checkpoint_metadata_mismatches(
+            {"metadata": default_meta},
+            build_training_metadata(cfg_scheduled, seed=42),
+        )
+
+        self.assertNotIn("regularization_schedule", {key for key, _, _ in default_mismatches})
+        self.assertIn("regularization_schedule", {key for key, _, _ in scheduled_mismatches})
+
+    def test_missing_regularization_schedule_is_compatible_with_non_120_epoch_default(self):
+        cfg_default = self.make_config()
+        cfg_default.epochs = 10
+        legacy_meta = build_training_metadata(cfg_default, seed=42)
+        legacy_meta.pop("regularization_schedule")
+
+        mismatches = checkpoint_metadata_mismatches(
+            {"metadata": legacy_meta},
+            build_training_metadata(cfg_default, seed=42),
+        )
+
+        self.assertNotIn("regularization_schedule", {key for key, _, _ in mismatches})
 
     def test_split_filename_with_tag_preserves_default_and_sanitizes_tag(self):
         self.assertEqual(

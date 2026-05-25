@@ -5,20 +5,20 @@
 ![License](https://img.shields.io/badge/License-MIT-blue?style=flat-square)
 ![Dataset](https://img.shields.io/badge/Dataset-AFAD--Full-orange?style=flat-square)
 
-A lightweight facial age estimation network that achieves competitive accuracy with significantly fewer parameters. Built on MobileNetV4-Small with 10 toggleable innovation modules for systematic ablation studies.
+A lightweight facial age estimation framework built on MobileNetV4-Small. It targets a compact accuracy/efficiency tradeoff and exposes the backbone plus configurable components for systematic ablation studies.
 
 **Former name:** HAL-Net
 
 ## Overview
 
-FADE-Net integrates multi-scale feature fusion, spatial pyramid pooling, and hybrid attention mechanisms into a lightweight architecture for apparent age estimation. The design targets edge deployment while maintaining server-level accuracy on the AFAD benchmark.
+FADE-Net integrates multi-scale feature fusion, spatial pyramid pooling, and distribution-based supervision into a lightweight architecture for apparent age estimation. The design targets efficient AFAD experiments; final 3-seed accuracy and deployment claims require the formal audit pipeline.
 
 **Key design principles:**
 - Texture-Semantic dual-stream feature fusion (MSFF)
 - Global-local spatial representation via SPP v2
 - Label distribution learning with adaptive sigma (DLDL-v2)
 - Mean-variance loss constraint for distribution calibration
-- 5 additional plug-and-play modules (M1--M5) for controlled ablation
+- 5 additional experimental modules (M1--M5) for controlled ablation
 
 ## Architecture
 
@@ -35,15 +35,15 @@ FADE-Net integrates multi-scale feature fusion, spatial pyramid pooling, and hyb
 | M4 (FREQ) | `--freq` | Frequency-domain channel attention (DCT) | OFF |
 | M5 (MOE) | `--moe` | Age-aware Mixture of Experts head | OFF |
 
-All 10 modules are independently toggleable via CLI flags or config. The backbone adapter supports MobileNetV4-Small (primary) and RepViT via `timm`, with torchvision MobileNetV3-Large as legacy fallback.
+The backbone and non-backbone components are configurable via CLI flags or config. The backbone adapter supports MobileNetV4-Small (primary) and RepViT via `timm`, with torchvision MobileNetV3-Large as legacy fallback. CoordAtt injection only applies to the legacy torchvision path; the default MobileNetV4 path uses the backbone's built-in attention.
 
 ## Project Structure
 
 ```
 F:\FADE-Net\
 ├── src/
-│   ├── config.py              # Configuration (10 module toggles, backbone adapter)
-│   ├── model.py               # FADE-Net architecture (all 10 modules)
+│   ├── config.py              # Configuration (backbone adapter and module switches)
+│   ├── model.py               # FADE-Net architecture
 │   ├── train.py               # Training loop (experiment management, EMA, AMP)
 │   ├── dataset.py             # AFAD dataset loader (DLDL, LDS, retry logic)
 │   ├── utils.py               # Loss functions (CombinedLoss, EMA, seed)
@@ -96,14 +96,14 @@ This project uses the **AFAD-Full** dataset (All Faces and Ages Dataset). See `d
 ### Training
 
 ```bash
-# Default training (MobileNetV4-Sall, 72-8-20 split)
-python src/train.py --seed 42 --split 72-8-20 --fresh
+# Default training (MobileNetV4-Small, 72-8-20 formal_v1 split)
+python src/train.py --seed 42 --split 72-8-20 --split_file_tag formal_v1 --fresh
 
 # With all innovation modules enabled
-python src/train.py --seed 42 --split 72-8-20 --fresh --texture --freq --moe --triplet --asym
+python src/train.py --seed 42 --split 72-8-20 --split_file_tag formal_v1 --fresh --texture --freq --moe --triplet --asym
 
 # Ablation: disable specific core modules
-python src/train.py --seed 42 --split 72-8-20 --fresh --no-msff --no-spp
+python src/train.py --seed 42 --split 72-8-20 --split_file_tag formal_v1 --fresh --no-msff --no-spp
 ```
 
 **Training features:**
@@ -132,9 +132,9 @@ python scripts/benchmark_speed.py
 Report results across 3 seeds (42, 3407, 2026) for mean +/- std:
 
 ```bash
-python src/train.py --seed 42 --split 72-8-20 --fresh
-python src/train.py --seed 3407 --split 72-8-20 --fresh
-python src/train.py --seed 2026 --split 72-8-20 --fresh
+python src/train.py --seed 42 --split 72-8-20 --split_file_tag formal_v1 --fresh
+python src/train.py --seed 3407 --split 72-8-20 --split_file_tag formal_v1 --fresh
+python src/train.py --seed 2026 --split 72-8-20 --split_file_tag formal_v1 --fresh
 ```
 
 The primary metric is `Selected_Test_MAE` from the final result file of each run.
@@ -143,7 +143,7 @@ The primary metric is `Selected_Test_MAE` from the final result file of each run
 
 **Experiment management.** Each run generates a unique fingerprint from its config and hyperparameters. Overwrite protection prevents accidental result corruption. All metadata (backbone, modules enabled, split protocol, seed) is recorded with each checkpoint.
 
-**Paper result audit pipeline.** All reported numbers must pass `scripts/audit_paper_results.py` to be considered paper-ready. This script verifies that results were produced under the correct protocol (AFAD 72-8-20, `formal_v1` tag) and flags any inconsistencies.
+**Paper result audit pipeline.** All reported result rows must pass `scripts/audit_paper_results.py` before they can be used as paper evidence. A `paper-ready` audit row means the single-row evidence chain is valid; final mean/std paper tables still require `scripts/summarize_paper_results.py` to mark all planned seeds as `complete`.
 
 **Backbone screening.** `scripts/run_backbone_screening.py` systematically evaluates candidate backbones under identical conditions. Results are logged to `docs/backbone_screening.md`.
 

@@ -19,9 +19,9 @@ from config import Config, ROOT_DIR
 from experiment import (
     artifact_path,
     build_training_metadata,
-    checkpoint_metadata_mismatches,
-    compatible_best_model_paths,
     format_metadata_mismatches,
+    inference_checkpoint_metadata_mismatches,
+    inference_compatible_best_model_paths,
     load_model_state_package,
     populate_runtime_model_metadata,
 )
@@ -201,19 +201,15 @@ def load_model(model_path=None):
     model = LightweightAgeEstimator(cfg).to(device)
     try:
         if model_path is None:
-            exact_path = artifact_path(ROOT_DIR, "best_model", cfg, 42, ".pth")
-            if os.path.exists(exact_path):
-                model_path = exact_path
-            else:
-                compatible, _incompatible = compatible_best_model_paths(ROOT_DIR, cfg, seed=42, device=device)
-                model_path = compatible[0] if compatible else None
-            
+            compatible, _incompatible = inference_compatible_best_model_paths(ROOT_DIR, cfg, seed=42, device=device)
+            model_path = compatible[0] if compatible else None
+
         if model_path is None:
             raise RuntimeError("No compatible best_model checkpoint found for current Config.")
         print(f"⏳ Loading model from: {model_path}")
         state_dict, checkpoint = load_model_state_package(model_path, device)
         expected_metadata = build_training_metadata(cfg, 42)
-        mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+        mismatches = inference_checkpoint_metadata_mismatches(checkpoint, expected_metadata)
         if mismatches:
             raise RuntimeError(format_metadata_mismatches(mismatches))
         model.load_state_dict(state_dict)
@@ -226,7 +222,7 @@ def load_model(model_path=None):
     transform = transforms.Compose([
         transforms.Resize((cfg.img_size, cfg.img_size)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=cfg.image_mean, std=cfg.image_std)
     ])
     
     mp_face_detection = mp.solutions.face_detection
@@ -348,7 +344,7 @@ def main():
         st.error(f"Model config initialization failed: {exc}")
         st.info("Check the current Python environment and install project requirements if needed.")
         st.stop()
-    compatible_models, incompatible_models = compatible_best_model_paths(ROOT_DIR, cfg, seed=42, device=device_for_scan)
+    compatible_models, incompatible_models = inference_compatible_best_model_paths(ROOT_DIR, cfg, seed=42, device=device_for_scan)
     model_files = [os.path.basename(f) for f in compatible_models]
     
     if not model_files:
@@ -475,52 +471,33 @@ def main():
         if run_video:
             # Force DirectShow for Windows to ensure instant startup
             cap = cv2.VideoCapture(c_idx, cv2.CAP_DSHOW)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) # Reduce latency
-            
-            if not cap.isOpened():
-                st.error(f"Cannot open camera {c_idx}")
-            else:
-                while run_video:
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) # Reduce latency
+
+                if not cap.isOpened():
+                    st.error(f"Cannot open camera {c_idx}")
+                else:
                     ret, frame = cap.read()
-                    if not ret: break
-                    
-                    # Convert to RGB
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    start_t = time.time()
-                    
-                    # Inference
-                    res_list = process_single_image(frame_rgb, model, dldl_tools, transform, face_detection, device, cfg, params)
-                    
-                    # Draw Overlay
-                    for r in res_list:
-                        x1,y1,x2,y2 = r['bbox']
-                        # Cyberpunk Box
-                        cv2.rectangle(frame_rgb, (x1, y1), (x2, y2), (0, 255, 255), 2)
-                        # Label
-                        label = f"Age: {r['mean_age']:.1f}"
-                        cv2.putText(frame_rgb, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                    
-                    fps = 1.0 / (time.time() - start_t)
-                    
-                    # Update UI
-                    place_video.image(frame_rgb, channels="RGB", use_container_width=True)
-                    place_stats.markdown(f"**System Status**: 🟢 ONLINE | **FPS**: {fps:.1f} | **Faces**: {len(res_list)}")
-                    
-                    # Streamlit rerun trick is not needed for loop, but we need to check toggle
-                    # Since streamlit script reruns top-down on interaction, the 'while' loop blocks interaction.
-                    # Proper way in streamlit is somewhat hacky or using 'streamlit-webrtc'.
-                    # For simple local demo, we just rely on the loop. To stop, user must toggle OFF (which triggers rerun).
-                    # Actually, inside the loop, we can't detect UI changes easily without experimental_rerun or session state checks.
-                    # We will just run for 10000 frames or until error for this basic demo.
-                    
-                    # BETTER: Use a placeholder button to stop?
-                    # Streamlit's st.toggle state won't update *during* this loop unless we interrupt.
-                    # We'll just run. User can click "Stop" which sets session state on next run? No.
-                    # User interprets "Toggle Off" -> Streamlit kills the script and restarts?
-                    # Yes, Streamlit "Stop" button or unchecking toggle usually triggers a re-run/halt.
-                    time.sleep(0.01)
-                    
-            cap.release()
+                    if ret:
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        start_t = time.time()
+                        res_list = process_single_image(frame_rgb, model, dldl_tools, transform, face_detection, device, cfg, params)
+
+                        for r in res_list:
+                            x1,y1,x2,y2 = r['bbox']
+                            cv2.rectangle(frame_rgb, (x1, y1), (x2, y2), (0, 255, 255), 2)
+                            label = f"Age: {r['mean_age']:.1f}"
+                            cv2.putText(frame_rgb, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+                        fps = 1.0 / max(time.time() - start_t, 1e-6)
+                        place_video.image(frame_rgb, channels="RGB", use_container_width=True)
+                        place_stats.markdown(f"**System Status**: 🟢 ONLINE | **FPS**: {fps:.1f} | **Faces**: {len(res_list)}")
+                        time.sleep(0.01)
+                        st.rerun()
+                    else:
+                        st.warning("Camera did not return a frame.")
+            finally:
+                cap.release()
 
 if __name__ == "__main__":
     main()

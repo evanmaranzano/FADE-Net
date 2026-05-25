@@ -88,7 +88,7 @@ def _write_split_json(save_path, train_indices, val_indices, test_indices, datas
         'val': val_indices,
         'test': test_indices,
     }
-    with open(save_path, 'w') as f:
+    with open(save_path, 'w', encoding='utf-8') as f:
         json.dump(save_data, f)
 
 
@@ -219,6 +219,8 @@ def file_sha256(path):
 # ==========================================
 class AFADDataset(Dataset):
     def __init__(self, root_dir, transform=None, config=None):
+        if config is None:
+            raise ValueError("AFADDataset requires a valid Config instance")
         self.transform = transform
         self.config = config
         self.dldl_proc = DLDLProcessor(config)
@@ -257,22 +259,16 @@ class AFADDataset(Dataset):
             warnings.warn("Failed to load image from empty AFAD dataset")
             return None
 
-        for attempt in range(3):
-            attempt_idx = idx if attempt == 0 else random.randrange(len(self.image_paths))
-            img_path = f"<index {attempt_idx}>"
-            try:
-                img_path = self.image_paths[attempt_idx]
-                age = self.ages[attempt_idx]
-                image = Image.open(img_path).convert('RGB')
-                if self.transform:
-                    image = self.transform(image)
-                label_dist = self.dldl_proc.generate_label_distribution(age)
-                return image, label_dist, torch.tensor(age, dtype=torch.float32)
-            except Exception as e:
-                last_error = e
-                last_path = img_path
-
-        warnings.warn(f"Failed to load image {last_path}: {last_error}")
+        img_path = self.image_paths[idx]
+        try:
+            age = self.ages[idx]
+            image = Image.open(img_path).convert('RGB')
+            if self.transform:
+                image = self.transform(image)
+            label_dist = self.dldl_proc.generate_label_distribution(age)
+            return image, label_dist, torch.tensor(age, dtype=torch.float32)
+        except Exception as e:
+            warnings.warn(f"Failed to load image {img_path}: {type(e).__name__}: {e}")
         return None
 
 
@@ -437,6 +433,9 @@ class SafeRandomErasing(object):
 # Main: Get DataLoaders
 # ==========================================
 def get_dataloaders(config):
+    image_mean = getattr(config, "image_mean", [0.485, 0.456, 0.406])
+    image_std = getattr(config, "image_std", [0.229, 0.224, 0.225])
+    fill_mean = tuple(int(round(channel * 255)) for channel in image_mean)
     # Transforms
     # Base Transforms list
     train_transforms_list = [
@@ -447,13 +446,13 @@ def get_dataloaders(config):
         
         # Added: Affine (Translation + Shear + Rotation)
         # Merged Rotation (15) into Affine to avoid black borders (Artifacts).
-        # Fill with approx ImageNet Mean (124, 116, 104)
+        # Fill with the same mean used by Normalize to avoid transform/model drift.
         transforms.RandomAffine(
             degrees=15, 
             translate=(0.05, 0.05), 
             scale=(0.9, 1.1), 
             shear=5,
-            fill=(124, 116, 104) 
+            fill=fill_mean
         ),
         
         # Added: Blur for quality robustness
@@ -463,7 +462,7 @@ def get_dataloaders(config):
         
         transforms.ColorJitter(0.2, 0.2, 0.1, 0.1),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=image_mean, std=image_std)
     ]
     
     # ✅ [Modified] Safe Random Erasing (Keypoint-Aware)
@@ -483,11 +482,12 @@ def get_dataloaders(config):
     
     train_transform = transforms.Compose(train_transforms_list)
     
+    val_resize_size = max(int(round(config.img_size * 232 / 224)), config.img_size)
     val_transform = transforms.Compose([
-        transforms.Resize(232),
-        transforms.CenterCrop(224),
+        transforms.Resize(val_resize_size),
+        transforms.CenterCrop(config.img_size),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        transforms.Normalize(mean=image_mean, std=image_std)
     ])
     
     print("=" * 60)

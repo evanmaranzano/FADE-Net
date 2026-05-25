@@ -5,6 +5,7 @@ import pytest
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
@@ -12,7 +13,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 from config import Config
 import dataset as dataset_module
-from dataset import AFADDataset, get_stratified_split, my_collate_fn
+from dataset import AFADDataset, get_dataloaders, get_stratified_split, my_collate_fn
 from utils import CombinedLoss, DLDLProcessor, EMAModel
 
 
@@ -58,6 +59,14 @@ def test_dldl_tensor_sigma_is_clamped_and_finite():
 
     assert torch.isfinite(dist).all()
     assert torch.isclose(dist.sum(), torch.tensor(1.0), atol=1e-6)
+
+
+def test_dldl_label_distribution_uses_age_scalar_device():
+    processor = DLDLProcessor(_cfg(use_dldl_v2=True, use_adaptive_sigma=True, sigma_min=1.0, sigma_max=3.0))
+
+    dist = processor.generate_label_distribution(torch.tensor(10.0, device="meta"))
+
+    assert dist.device.type == "meta"
 
 
 def test_ema_registers_frozen_params_before_unfreeze():
@@ -110,17 +119,22 @@ def _afad_root_with_images(tmp_path, *images):
     return tmp_path
 
 
-def test_afad_dataset_retries_random_fallback_after_failed_image(monkeypatch, tmp_path):
+def test_afad_dataset_returns_none_after_failed_image_without_random_fallback(monkeypatch, tmp_path):
     root = _afad_root_with_images(tmp_path, ("bad.jpg", False), ("good.jpg", True))
     cfg = _cfg(min_age=0, max_age=100, num_classes=101, use_dldl_v2=False)
     dataset = AFADDataset(str(root), transform=lambda image: torch.ones(1), config=cfg)
-    monkeypatch.setattr(dataset_module.random, "randrange", lambda size: 1)
+    fallback_sizes = []
 
-    image, label_dist, age = dataset[0]
+    def fallback_index(size):
+        fallback_sizes.append(size)
+        return 1
 
-    assert torch.equal(image, torch.ones(1))
-    assert torch.isclose(label_dist.sum(), torch.tensor(1.0), atol=1e-6)
-    assert age.item() == 10.0
+    monkeypatch.setattr(dataset_module.random, "randrange", fallback_index)
+
+    with pytest.warns(UserWarning, match="Failed to load image"):
+        assert dataset[0] is None
+
+    assert fallback_sizes == []
 
 
 def test_afad_dataset_returns_none_after_bounded_failed_fallbacks(monkeypatch, tmp_path):
@@ -137,7 +151,7 @@ def test_afad_dataset_returns_none_after_bounded_failed_fallbacks(monkeypatch, t
 
     with pytest.warns(UserWarning, match="Failed to load image"):
         assert dataset[0] is None
-    assert fallback_sizes == [2, 2]
+    assert fallback_sizes == []
 
 
 def test_collate_filters_none_and_handles_all_empty_batches():
@@ -152,3 +166,38 @@ def test_collate_filters_none_and_handles_all_empty_batches():
     assert empty_images.numel() == 0
     assert empty_labels.numel() == 0
     assert empty_ages.numel() == 0
+
+
+def test_validation_transform_uses_config_img_size(monkeypatch, tmp_path):
+    root = _afad_root_with_images(
+        tmp_path,
+        ("a.jpg", True),
+        ("b.jpg", True),
+        ("c.jpg", True),
+    )
+    cfg = _cfg(
+        afad_dir=str(root),
+        img_size=4,
+        min_age=0,
+        max_age=100,
+        num_classes=101,
+        batch_size=2,
+        num_workers=0,
+        use_dldl_v2=False,
+        split_protocol="72-8-20",
+        split_file_tag="pytest_imgsize",
+        allow_legacy_split_upgrade=False,
+    )
+    monkeypatch.setattr(dataset_module, "ROOT_DIR", str(tmp_path))
+
+    _train_loader, val_loader, test_loader, _class_weights = get_dataloaders(cfg)
+
+    val_resize = next(t for t in val_loader.dataset.transform.transforms if isinstance(t, transforms.Resize))
+    val_crop = next(t for t in val_loader.dataset.transform.transforms if isinstance(t, transforms.CenterCrop))
+    test_resize = next(t for t in test_loader.dataset.transform.transforms if isinstance(t, transforms.Resize))
+    test_crop = next(t for t in test_loader.dataset.transform.transforms if isinstance(t, transforms.CenterCrop))
+
+    assert val_crop.size == (4, 4)
+    assert val_resize.size == 4
+    assert test_crop.size == (4, 4)
+    assert test_resize.size == 4

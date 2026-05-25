@@ -140,7 +140,7 @@ Before copying any result into a paper table, run the paper-result audit:
 .\.venv\Scripts\python.exe -B scripts/audit_paper_results.py --split_file_tag formal_v1 --candidates mobilenet_v3_large,mobilenetv4_conv_small,mobilenetv4_conv_small_050 --seeds 42,3407,2026 --output docs/paper_result_audit.csv
 ```
 
-Only rows with `status=paper-ready` may enter formal result tables. Rows marked `blocked` must be treated as candidate triage or historical evidence. `docs/paper_result_audit_formal_v1_seed42.csv` currently audits `mobilenetv4_conv_small` seed42 as `paper-ready`; `docs/paper_result_audit_current.csv` is an older blocked audit sample kept as historical reference.
+Only rows with `status=paper-ready` may be used as single-row paper evidence. Final mean/std tables must come from `scripts/summarize_paper_results.py` rows marked `complete`; `partial` rows stay single-seed evidence only. Rows marked `blocked` must be treated as candidate triage or historical evidence. `docs/paper_result_audit_formal_v1_seed42.csv` currently audits `mobilenetv4_conv_small` seed42 as `paper-ready`; `docs/paper_result_audit_current.csv` is an older blocked audit sample kept as historical reference.
 
 After auditing, generate a gap-aware paper table draft:
 

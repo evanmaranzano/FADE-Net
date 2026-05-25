@@ -48,6 +48,8 @@ def parse_ablation_ids(ablation_arg):
 def apply_ablation_profile(cfg, ablation_id):
     if not ablation_id:
         return cfg
+    if ablation_id not in ABLATION_PROFILES:
+        raise KeyError(f"Unknown ablation_id: {ablation_id!r}. Available: {sorted(ABLATION_PROFILES)}")
     for name in ABLATION_FIELDS:
         setattr(cfg, name, False)
     for name, value in ABLATION_PROFILES[ablation_id].items():

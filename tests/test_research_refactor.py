@@ -44,6 +44,10 @@ class ResearchRefactorTests(unittest.TestCase):
             (model.feature_spec.shallow_channels, model.feature_spec.mid_channels),
             tuple(cfg.effective_msff_channels),
         )
+        self.assertGreaterEqual(model.feature_spec.shallow_spatial[0], model.feature_spec.mid_spatial[0])
+        self.assertGreaterEqual(model.feature_spec.shallow_spatial[1], model.feature_spec.mid_spatial[1])
+        self.assertGreaterEqual(model.feature_spec.mid_spatial[0], model.feature_spec.deep_spatial[0])
+        self.assertGreaterEqual(model.feature_spec.mid_spatial[1], model.feature_spec.deep_spatial[1])
 
     def test_training_metadata_distinguishes_backbones(self):
         cfg_a = self.make_fast_config()

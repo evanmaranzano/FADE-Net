@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 # import mediapipe as mp
-import copy
 import random
 import os
 from contextlib import nullcontext
@@ -85,7 +84,8 @@ class DLDLProcessor:
 
         # 计算每个年龄节点 j 与 真实年龄 y 的差异
         # $$P(j|x) \propto e^{-\frac{(j-y)^2}{2\sigma^2}}$$
-        diff = self.age_indices - age_scalar
+        age_indices = self.age_indices.to(dtype=age_scalar.dtype, device=age_scalar.device)
+        diff = age_indices - age_scalar
         prob_dist = torch.exp(-0.5 * (diff / sigma) ** 2)
 
         # 归一化保证概率和为1
@@ -102,11 +102,10 @@ class DLDLProcessor:
         """
         推理端：对预测分布进行加权求和。
         """
-        if predicted_probs.device != self.age_indices.device:
-            self.age_indices = self.age_indices.to(predicted_probs.device)
+        age_indices = self.age_indices.to(predicted_probs.device)
 
         # 期望计算：概率 * 年龄值 的总和
-        batch_expected_age = torch.sum(predicted_probs * self.age_indices, dim=1)
+        batch_expected_age = torch.sum(predicted_probs * age_indices, dim=1)
         return batch_expected_age
 
 # ==========================================
@@ -139,7 +138,7 @@ class EMAModel:
             if param.requires_grad:
                 if name not in self.shadow:
                     raise KeyError(f"EMA apply_shadow: {name} not in shadow. Was register() called?")
-                self.backup[name] = param.data
+                self.backup[name] = param.data.clone()
                 param.data = self.shadow[name]
 
     def restore(self):
@@ -232,7 +231,6 @@ def utils_cdf(age, num_classes, device):
     # So 1 if k < true_age ? 
     # Typically CDF is 1 for k >= true_age.
     # Let takes floor.
-    mask = (indices >= age.unsqueeze(1)).float() 
     # target CDF: 0 0 0 1 1 1 ... (step at age)
     # Actually: 0 0 0 ... until age, then 1.
     return (indices >= age.unsqueeze(1)).float()
@@ -281,13 +279,18 @@ class AdaptiveTripletLoss(nn.Module):
     margin = base_margin * (1 + alpha * |age_diff|)
     Vectorized implementation. Inspired by HEAT (Multimedia Systems 2026)."""
 
-    def __init__(self, base_margin=1.0, alpha=0.05, age_threshold=3.0):
+    def __init__(self, base_margin=0.2, alpha=0.01, age_threshold=3.0, max_margin=0.5):
         super().__init__()
         self.base_margin = base_margin
         self.alpha = alpha
         self.age_threshold = age_threshold
+        self.max_margin = max_margin
 
     _MAX_TRIPLET_BATCH = 64
+
+    def _adaptive_margin(self, age_diff):
+        margin = self.base_margin * (1.0 + self.alpha * age_diff)
+        return torch.clamp(margin, max=self.max_margin)
 
     def forward(self, embeddings, ages):
         B = embeddings.shape[0]
@@ -299,6 +302,7 @@ class AdaptiveTripletLoss(nn.Module):
             embeddings = embeddings[idx]
             ages = ages[idx]
             B = self._MAX_TRIPLET_BATCH
+        embeddings = F.normalize(embeddings, p=2, dim=1)
         dist = torch.cdist(embeddings, embeddings, p=2)  # (B, B)
         age_diff = torch.abs(ages.unsqueeze(0) - ages.unsqueeze(1))  # (B, B)
         mask_pos = (age_diff < self.age_threshold).float()
@@ -311,7 +315,7 @@ class AdaptiveTripletLoss(nn.Module):
         # margin[i,k] for negative pairs
         d_pos = dist.unsqueeze(2)       # (B, B, 1)
         d_neg = dist.unsqueeze(1)       # (B, 1, B)
-        m = self.base_margin * (1.0 + self.alpha * age_diff.unsqueeze(1))  # (B, 1, B)
+        m = self._adaptive_margin(age_diff.unsqueeze(1))  # (B, 1, B)
         violation = F.relu(d_pos - d_neg + m)  # (B, B, B)
         # Mask: valid triple = (i,j) positive AND (i,k) negative
         valid = mask_pos.unsqueeze(2) * mask_neg.unsqueeze(1)  # (B, B, B)
@@ -379,9 +383,10 @@ class CombinedLoss(nn.Module):
         if self.use_adaptive_triplet:
             self.lambda_triplet = getattr(config, 'lambda_triplet', 0.1)
             self.triplet_loss_fn = AdaptiveTripletLoss(
-                base_margin=getattr(config, 'triplet_base_margin', 1.0),
-                alpha=getattr(config, 'triplet_alpha', 0.05),
+                base_margin=getattr(config, 'triplet_base_margin', 0.2),
+                alpha=getattr(config, 'triplet_alpha', 0.01),
                 age_threshold=getattr(config, 'triplet_age_threshold', 3.0),
+                max_margin=getattr(config, 'triplet_max_margin', 0.5),
             )
 
         # M3: Asymmetric Ordinal Loss
@@ -396,6 +401,7 @@ class CombinedLoss(nn.Module):
 
         self.use_moe = getattr(config, 'use_moe', False)
         self.lambda_moe_gate = getattr(config, 'lambda_moe_gate', 0.02)
+        self.lambda_moe_balance = getattr(config, 'lambda_moe_balance', 0.005)
         self.num_moe_experts = getattr(config, 'moe_num_experts', 3)
         self.min_age = getattr(config, 'min_age', 0)
         self.max_age = getattr(config, 'max_age', 80)
@@ -408,6 +414,13 @@ class CombinedLoss(nn.Module):
         gate_targets = torch.zeros(target_dists.shape[0], self.num_moe_experts, device=device, dtype=target_dists.dtype)
         gate_targets.scatter_add_(1, bin_ids.unsqueeze(0).expand(target_dists.shape[0], -1), target_dists.to(device))
         return gate_targets.clamp_min(1e-8)
+
+    def _moe_batch_balance_loss(self, gate_probs, target_dists, device):
+        target_usage = self._moe_gate_targets(target_dists, device).mean(dim=0)
+        target_usage = target_usage / target_usage.sum().clamp_min(1e-8)
+        gate_usage = gate_probs.mean(dim=0).clamp_min(1e-8)
+        gate_usage = gate_usage / gate_usage.sum().clamp_min(1e-8)
+        return F.kl_div(gate_usage.log(), target_usage, reduction='sum')
 
     def forward(self, log_probs, target_dists, true_ages, logits, embeddings=None, extras=None):
         # 1. KL 散度 (Main Loss)
@@ -475,9 +488,13 @@ class CombinedLoss(nn.Module):
         if self.use_moe and extras and extras.get("moe_gate_logits") is not None:
             gate_targets = self._moe_gate_targets(target_dists, log_probs.device)
             gate_log_probs = F.log_softmax(extras["moe_gate_logits"], dim=1)
+            gate_probs = torch.exp(gate_log_probs)
             loss_moe_gate = F.kl_div(gate_log_probs, gate_targets, reduction='batchmean')
-            term_moe_gate = self.lambda_moe_gate * loss_moe_gate
+            loss_moe_balance = self._moe_batch_balance_loss(gate_probs, target_dists, log_probs.device)
+            logged_moe_gate = loss_moe_gate + loss_moe_balance
+            term_moe_gate = self.lambda_moe_gate * loss_moe_gate + self.lambda_moe_balance * loss_moe_balance
         else:
+            logged_moe_gate = loss_moe_gate
             term_moe_gate = 0.0
 
         # 总损失
@@ -493,5 +510,5 @@ class CombinedLoss(nn.Module):
             loss_mv.detach().item(),
             loss_triplet.detach().item(),
             loss_asym.detach().item(),
-            loss_moe_gate.detach().item(),
+            logged_moe_gate.detach().item(),
         )
