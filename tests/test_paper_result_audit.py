@@ -252,6 +252,25 @@ class PaperResultAuditTests(unittest.TestCase):
         self.assertEqual({"experiment_id": "safe"}, metadata)
         self.assertTrue(calls[0][1]["weights_only"])
 
+    def test_load_checkpoint_metadata_rejects_unsafe_legacy_torch_load(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "checkpoint.pth"
+            checkpoint_path.write_bytes(b"placeholder")
+            calls = []
+
+            def fake_load(path, **kwargs):
+                calls.append((path, kwargs))
+                if kwargs.get("weights_only") is True:
+                    raise TypeError("weights_only is not supported")
+                return {"model_state_dict": {}, "metadata": {"experiment_id": "unsafe"}}
+
+            with unittest.mock.patch("audit_paper_results.torch.load", side_effect=fake_load):
+                metadata, error = load_checkpoint_metadata(checkpoint_path)
+
+        self.assertIsNone(metadata)
+        self.assertIn("weights_only=True", error)
+        self.assertEqual(1, len(calls))
+
     def test_load_split_payload_rejects_paths_outside_root(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "root"

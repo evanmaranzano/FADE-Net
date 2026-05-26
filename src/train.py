@@ -24,6 +24,7 @@ from experiment import (
     hard_distillation_schedule_metadata as _metadata_hard_distillation_schedule_metadata,
     hard_distillation_start_epoch as _metadata_hard_distillation_start_epoch,
     load_model_state_package,
+    safe_torch_load,
     save_model_package,
 )
 from evaluation import TTA_MODES, evaluate_mae, predict_probs, probs_to_ages
@@ -198,10 +199,7 @@ def _guard_fresh_artifact_overwrite(paths, expected_metadata, device, allow_over
         detail = "non-checkpoint artifact"
         if str(path).endswith(".pth"):
             try:
-                try:
-                    checkpoint = torch.load(path, map_location=device, weights_only=True)
-                except TypeError:
-                    checkpoint = torch.load(path, map_location=device)
+                checkpoint = safe_torch_load(path, device)
                 mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
                 detail = (
                     "checkpoint metadata matches current run"
@@ -476,11 +474,7 @@ def train(args):
 
     if should_resume and os.path.exists(checkpoint_path):
         print(f"🔄 发现存档 '{checkpoint_path}'，正在恢复...")
-        try:
-            checkpoint = torch.load(checkpoint_path, map_location=cfg.device, weights_only=True)
-        except TypeError:
-            print(f"WARNING: weights_only=True not supported, falling back to unsafe loading: {checkpoint_path}")
-            checkpoint = torch.load(checkpoint_path, map_location=cfg.device)
+        checkpoint = safe_torch_load(checkpoint_path, cfg.device)
         mismatches = checkpoint_metadata_mismatches(checkpoint, training_metadata)
         if mismatches:
             raise RuntimeError(f"Checkpoint metadata mismatch; refusing to resume. {_format_metadata_mismatches(mismatches)}")
@@ -850,7 +844,9 @@ def train(args):
                 raise RuntimeError(f"Best model metadata mismatch; refusing final evaluation. {_format_metadata_mismatches(mismatches)}")
             model.load_state_dict(remap_state_dict_keys(state_dict))
             print(f"📂 Loaded Best Model from {best_model_path}")
-        
+        else:
+            print(f"⚠️ Best model not found at {best_model_path}; evaluating last epoch model")
+
         test_metrics = evaluate_mae(model, test_loader, cfg, cfg.device, modes=TTA_MODES, max_batches=max_test_batches)
         selected_tta = training_metadata["selection_metric"]["tta"]
         final_test_mae = test_metrics[selected_tta]

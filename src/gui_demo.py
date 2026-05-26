@@ -19,10 +19,9 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPointF, QPoint
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPainter, QColor, QPen, QBrush
 
-from model import LightweightAgeEstimator
 from config import Config, ROOT_DIR # Added ROOT_DIR
 from experiment import (
-    artifact_path,
+    build_model_for_checkpoint_load,
     build_training_metadata,
     format_metadata_mismatches,
     inference_checkpoint_metadata_mismatches,
@@ -352,7 +351,7 @@ class WorkerThread(QThread):
         
         try:
             print("DEBUG: Instantiating LightweightAgeEstimator...", flush=True)
-            self.model = LightweightAgeEstimator(self.cfg).to(self.device)
+            self.model = build_model_for_checkpoint_load(self.cfg).to(self.device)
             
             model_path = default_model_path(self.cfg, self.device)
 
@@ -527,6 +526,8 @@ class WorkerThread(QThread):
                 bytes_per_line = ch * w
                 qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
                 self.change_pixmap_signal.emit(qt_image)
+                if self.mode == 'image':
+                    self._run_flag = False  # single-image mode finishes after one inference pass
 
         except Exception as e:
             print(f"⚠️ 线程异常: {e}")

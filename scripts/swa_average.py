@@ -30,6 +30,7 @@ from experiment import (
     checkpoint_metadata_mismatches,
     load_model_state_package,
     populate_runtime_model_metadata,
+    safe_torch_load,
 )
 from evaluation import TTA_MODES, evaluate_mae
 from utils import remap_state_dict_keys
@@ -50,10 +51,7 @@ def average_checkpoints(checkpoint_paths, device='cpu'):
     
     for i, path in enumerate(checkpoint_paths):
         print(f"   Loading [{i+1}/{n}]: {os.path.basename(path)}")
-        try:
-            checkpoint = torch.load(path, map_location=device, weights_only=True)
-        except TypeError:
-            checkpoint = torch.load(path, map_location=device)
+        checkpoint = safe_torch_load(path, device)
         if not isinstance(checkpoint, dict) or 'model_state_dict' not in checkpoint:
             raise RuntimeError(f"Checkpoint is not a packaged training checkpoint: {path}")
         if metadata is None:

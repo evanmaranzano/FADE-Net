@@ -3,6 +3,9 @@ import cv2
 import torch
 import torch.nn.functional as F
 import numpy as np
+from PIL import Image
+
+Image.MAX_IMAGE_PIXELS = 25_000_000  # 25 megapixels limit
 import mediapipe as mp
 from PIL import Image
 from torchvision import transforms
@@ -14,10 +17,9 @@ import glob
 import os
 
 # Import local modules
-from model import LightweightAgeEstimator
 from config import Config, ROOT_DIR
 from experiment import (
-    artifact_path,
+    build_model_for_checkpoint_load,
     build_training_metadata,
     format_metadata_mismatches,
     inference_checkpoint_metadata_mismatches,
@@ -197,8 +199,6 @@ def load_model(model_path=None):
     cfg = Config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # Updated instantiation to match src/model.py
-    model = LightweightAgeEstimator(cfg).to(device)
     try:
         if model_path is None:
             compatible, _incompatible = inference_compatible_best_model_paths(ROOT_DIR, cfg, seed=42, device=device)
@@ -207,6 +207,7 @@ def load_model(model_path=None):
         if model_path is None:
             raise RuntimeError("No compatible best_model checkpoint found for current Config.")
         print(f"⏳ Loading model from: {model_path}")
+        model = build_model_for_checkpoint_load(cfg).to(device)
         state_dict, checkpoint = load_model_state_package(model_path, device)
         expected_metadata = build_training_metadata(cfg, 42)
         mismatches = inference_checkpoint_metadata_mismatches(checkpoint, expected_metadata)
@@ -386,7 +387,7 @@ def main():
             src_method = st.radio("Method", ["Upload", "Snapshot"], label_visibility="collapsed")
             img_input = None
             if src_method == "Upload":
-                f = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"])
+                f = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"], accept_multiple_files=False)
                 if f: img_input = np.array(Image.open(f).convert('RGB'))
             else:
                 f = st.camera_input("Take Snapshot")
@@ -421,8 +422,12 @@ def main():
     with tab2:
         st.markdown("#### Bulk Analysis")
         files = st.file_uploader("Upload Multiple Images", type=["jpg", "png"], accept_multiple_files=True)
-        
+        MAX_BATCH_FILES = 50
+
         if files:
+            if len(files) > MAX_BATCH_FILES:
+                st.warning(f"Too many files. Only the first {MAX_BATCH_FILES} will be processed.")
+                files = files[:MAX_BATCH_FILES]
             if st.button(f"Process {len(files)} Images"):
                 progress_bar = st.progress(0)
                 batch_results = []

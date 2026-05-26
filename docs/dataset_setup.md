@@ -1,6 +1,6 @@
 # Dataset Setup Guide for FADE-Net
 
-This guide explains how to prepare the datasets (**AFAD**, **AAF**, **UTKFace**) required for training and evaluating FADE-Net.
+This guide explains how to prepare **AFAD-Full**, the dataset required by the current training and evaluation pipeline. AAF and UTKFace are historical or optional references only; the current `src/dataset.py` dataloader uses AFAD.
 
 ## 1. Directory Structure
 
@@ -9,9 +9,7 @@ The project expects the following structure after preprocessing:
 ```
 code/
 ├── datasets/           # Processed & Aligned images (Generated)
-│   ├── AFAD/
-│   ├── AAF/
-│   └── UTKFace/
+│   └── AFAD/
 ├── data/               # Raw downloaded datasets (Recommended)
 │   ├── UTKFace/
 │   ├── AFAD-Full/
@@ -20,7 +18,7 @@ code/
 
 ## 2. Preparing Raw Data
 
-Please ensure you have the raw datasets downloaded.
+Please ensure you have the AFAD-Full raw dataset downloaded.
 
 ### AFAD (Asian Face Age Dataset)
 *   **Source**: [GitHub / Official Site]
@@ -29,12 +27,12 @@ Please ensure you have the raw datasets downloaded.
 *   **Override path**: set `FADE_NET_AFAD_DIR` or pass `--afad_dir` to training/evaluation scripts.
 *   **Verified local path**: `F:/QQFiles/Study/shit/tarball/tarball-master/AFAD-Full.tar/AFAD-Full~/AFAD-Full`
 
-### AAF (All-Age-Faces Dataset)
+### AAF (All-Age-Faces Dataset, historical/optional)
 *   **Source**: [GitHub]
 *   **Format**: Flat folder with aligned faces.
 *   **Path in Script**: Please check `scripts/preprocess.py`.
 
-### UTKFace
+### UTKFace (historical/optional)
 *   **Source**: [Susanqq/UTKFace]
 *   **Path**: Expects `./data/UTKFace/train` and `./data/UTKFace/val`.
 

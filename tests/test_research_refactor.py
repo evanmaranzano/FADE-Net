@@ -75,7 +75,27 @@ class ResearchRefactorTests(unittest.TestCase):
         self.assertIn("experiment_id", mismatch_keys)
         self.assertIn("backbone", mismatch_keys)
 
-    def test_timm_stage_index_fallback_uses_valid_indices(self):
+    def test_timm_stage_indices_must_be_explicitly_valid(self):
+        try:
+            from backbones import TimmFeatureBackbone
+        except ImportError:
+            self.skipTest("timm is not installed")
+
+        cfg = self.make_fast_config()
+        cfg.backbone_source = "timm"
+        cfg.backbone_name = "mobilenetv4_conv_small"
+        cfg.backbone_pretrained = False
+        cfg.msff_feature_indices = (6, 12)
+
+        try:
+            with self.assertRaises(ValueError):
+                LightweightAgeEstimator(cfg)
+        except ImportError:
+            self.skipTest("timm is not installed")
+        except RuntimeError as exc:
+            self.skipTest(f"timm model is unavailable in this environment: {exc}")
+
+    def test_default_timm_stage_indices_are_valid_without_fallback(self):
         try:
             from backbones import TimmFeatureBackbone
         except ImportError:
@@ -92,17 +112,16 @@ class ResearchRefactorTests(unittest.TestCase):
             self.skipTest("timm is not installed")
         except RuntimeError as exc:
             self.skipTest(f"timm model is unavailable in this environment: {exc}")
-        except ValueError as exc:
-            self.skipTest(f"timm model is unavailable in this environment: {exc}")
 
         self.assertIsInstance(model.backbone, TimmFeatureBackbone)
         self.assertLess(max(model.msff_indices), model.backbone.feature_count)
+        self.assertEqual((1, 3), tuple(model.msff_indices))
         meta = build_training_metadata(cfg, seed=42)
         self.assertTrue(meta["ablations"]["use_hybrid_attention"])
         self.assertFalse(meta["ablations"]["effective_hybrid_attention"])
         self.assertNotIn("_HA_", cfg.project_name)
 
-    def test_timm_pretrained_load_failure_falls_back_to_random_weights(self):
+    def test_timm_pretrained_load_failure_is_not_silently_random_initialized(self):
         try:
             from backbones import TimmFeatureBackbone
         except ImportError:
@@ -117,18 +136,15 @@ class ResearchRefactorTests(unittest.TestCase):
                 super().__init__()
                 self.feature_info = FakeFeatureInfo()
 
-        fake_model = FakeTimmModel()
-
         with mock.patch(
             "timm.create_model",
-            side_effect=[RuntimeError("offline weights unavailable"), fake_model],
+            side_effect=RuntimeError("offline weights unavailable"),
         ) as create_model:
-            backbone = TimmFeatureBackbone("mobilenetv4_conv_small", pretrained=True)
+            with self.assertRaises(RuntimeError):
+                TimmFeatureBackbone("mobilenetv4_conv_small", pretrained=True)
 
-        self.assertIs(backbone.model, fake_model)
-        self.assertEqual(2, create_model.call_count)
+        self.assertEqual(1, create_model.call_count)
         self.assertTrue(create_model.call_args_list[0].kwargs["pretrained"])
-        self.assertFalse(create_model.call_args_list[1].kwargs["pretrained"])
 
 
 if __name__ == "__main__":

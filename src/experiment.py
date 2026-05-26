@@ -22,6 +22,18 @@ def populate_runtime_model_metadata(config) -> None:
         config.backbone_pretrained = original_pretrained
 
 
+def build_model_for_checkpoint_load(config):
+    """Build checkpoint target architecture without fetching pretrained weights."""
+    from model import LightweightAgeEstimator
+
+    original_pretrained = getattr(config, "backbone_pretrained", True)
+    config.backbone_pretrained = False
+    try:
+        return LightweightAgeEstimator(config)
+    finally:
+        config.backbone_pretrained = original_pretrained
+
+
 def sanitize_token(value: Any) -> str:
     token = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value).strip())
     return token.strip("._-") or "unset"
@@ -143,6 +155,22 @@ def augmentation_signature(config) -> dict[str, Any]:
     }
 
 
+def training_signature(config) -> dict[str, Any]:
+    return {
+        "batch_size": getattr(config, "batch_size", None),
+        "learning_rate": getattr(config, "learning_rate", None),
+        "weight_decay": getattr(config, "weight_decay", None),
+        "freeze_backbone_epochs": getattr(config, "freeze_backbone_epochs", None),
+    }
+
+
+def ema_signature(config) -> dict[str, Any]:
+    return {
+        "use_ema": bool(getattr(config, "use_ema", False)),
+        "ema_decay": getattr(config, "ema_decay", None),
+    }
+
+
 def build_experiment_id(config, seed: int) -> str:
     backbone = backbone_signature(config)
     weights_tag = "pretrained" if backbone["pretrained"] else "scratch"
@@ -185,6 +213,8 @@ def build_training_metadata(config, seed: int, split_metadata: dict[str, Any] | 
         "ablations": ablation_signature(config),
         "loss": loss_signature(config),
         "augmentation": augmentation_signature(config),
+        "training": training_signature(config),
+        "ema": ema_signature(config),
         "regularization_schedule": regularization_schedule_signature(config),
         "reported_tta_modes": ["raw", "flip", "multi"],
         "selection_metric": {
@@ -290,6 +320,8 @@ METADATA_KEYS = (
     "ablations",
     "loss",
     "augmentation",
+    "training",
+    "ema",
     "regularization_schedule",
     "reported_tta_modes",
     "selection_metric",
@@ -351,12 +383,19 @@ def save_model_package(model, path: str, metadata: dict[str, Any]) -> None:
     torch.save({"model_state_dict": model.state_dict(), "metadata": metadata}, path)
 
 
-def load_model_state_package(path: str, device):
+def safe_torch_load(path: str, device):
     try:
-        checkpoint = torch.load(path, map_location=device, weights_only=True)
-    except TypeError:
-        print(f"WARNING: weights_only=True not supported, falling back to unsafe loading: {path}")
-        checkpoint = torch.load(path, map_location=device)
+        return torch.load(path, map_location=device, weights_only=True)
+    except TypeError as exc:
+        raise RuntimeError(
+            "Current PyTorch does not support torch.load(weights_only=True); "
+            "refusing unsafe checkpoint deserialization. Upgrade PyTorch before "
+            f"loading checkpoint: {path}"
+        ) from exc
+
+
+def load_model_state_package(path: str, device):
+    checkpoint = safe_torch_load(path, device)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         return checkpoint["model_state_dict"], checkpoint
     return checkpoint, {"metadata": {}}

@@ -61,7 +61,7 @@ F:\FADE-Net\
 │   ├── swa_average.py             # Stochastic Weight Averaging
 │   ├── calc_params.py             # Parameter / FLOPs calculation
 │   └── benchmark_speed.py         # Speed benchmark
-├── tests/                     # 12 test files covering all modules
+├── tests/                     # Regression and integration tests
 ├── docs/
 │   ├── ablation_plan_v4.md    # Ablation experiment plan
 │   ├── backbone_screening.md  # Backbone screening results
@@ -116,7 +116,7 @@ python src/train.py --seed 42 --split 72-8-20 --split_file_tag formal_v1 --fresh
 
 ```bash
 # Advanced evaluation with TTA (multi-scale + flip)
-python scripts/advanced_eval.py --checkpoint best_model.pth
+python scripts/advanced_eval.py --model_path best_model.pth --seed 42 --split 72-8-20 --split_file_tag formal_v1
 
 # Backbone parameter / FLOPs analysis
 python scripts/calc_params.py
@@ -172,8 +172,8 @@ python src/gui_demo.py
 python -m pytest tests/ -v
 ```
 
-12 test files cover all innovation modules: adaptive triplet, asymmetric ordinal, frequency attention, MoE head, texture branch, backbone screening, experiment integrity, paper result audit, and integration tests.
+18 test files cover innovation modules, demo safety, backbone screening, experiment integrity, paper result audit, packaging, plotting, and training-loop regressions.
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License.

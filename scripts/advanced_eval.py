@@ -23,7 +23,6 @@ sys.path.insert(0, ROOT_DIR)
 
 from config import Config
 from ablation_profiles import apply_ablation_profile, parse_ablation_ids
-from model import LightweightAgeEstimator
 from dataset import get_dataloaders
 from evaluation import (
     TTA_MODES,
@@ -36,6 +35,7 @@ from evaluation import (
 )
 from experiment import (
     artifact_path,
+    build_model_for_checkpoint_load,
     build_training_metadata,
     checkpoint_metadata_mismatches,
     load_model_state_package,
@@ -68,7 +68,7 @@ def format_metadata_mismatches(mismatches):
 
 
 def load_checked_model(model_path, cfg, seed, device):
-    model = LightweightAgeEstimator(cfg)
+    model = build_model_for_checkpoint_load(cfg)
     state_dict, checkpoint = load_model_state_package(model_path, device)
     expected_metadata = build_training_metadata(cfg, seed)
     mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)

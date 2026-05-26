@@ -25,6 +25,7 @@ from experiment import (
     build_training_metadata,
     checkpoint_metadata_mismatches,
     populate_runtime_model_metadata,
+    safe_torch_load,
 )
 from run_backbone_screening import parse_result_metrics, select_candidates
 
@@ -77,9 +78,9 @@ def load_checkpoint_metadata(path):
     if not path.is_file():
         return None, f"missing checkpoint: {path}"
     try:
-        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = safe_torch_load(path, "cpu")
+    except RuntimeError as exc:
+        return None, str(exc)
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         return None, f"not a packaged checkpoint: {path}"
     metadata = checkpoint.get("metadata")

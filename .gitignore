@@ -44,3 +44,7 @@ technical_report.html
 # AI Assistant and Local Output
 .claude/
 output/
+
+# IDE & Tools
+.codegraph/
+.cursor/

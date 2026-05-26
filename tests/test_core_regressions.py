@@ -13,7 +13,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 from config import Config
 import dataset as dataset_module
-from dataset import AFADDataset, get_dataloaders, get_stratified_split, my_collate_fn
+from dataset import AFADDataset, SubsetWithTransform, get_dataloaders, get_stratified_split, my_collate_fn, strict_collate_fn
 from utils import CombinedLoss, DLDLProcessor, EMAModel
 
 
@@ -69,6 +69,16 @@ def test_dldl_label_distribution_uses_age_scalar_device():
     assert dist.device.type == "meta"
 
 
+def test_no_dldl_uses_one_hot_age_targets():
+    processor = DLDLProcessor(_cfg(use_dldl_v2=False))
+
+    dist = processor.generate_label_distribution(torch.tensor(10.0))
+
+    assert torch.count_nonzero(dist).item() == 1
+    assert dist[10] == pytest.approx(1.0)
+    assert torch.isclose(dist.sum(), torch.tensor(1.0), atol=1e-6)
+
+
 def test_ema_registers_frozen_params_before_unfreeze():
     model = torch.nn.Linear(2, 1)
     model.weight.requires_grad = False
@@ -119,18 +129,17 @@ def _afad_root_with_images(tmp_path, *images):
     return tmp_path
 
 
-def test_afad_dataset_retries_on_failed_image(monkeypatch, tmp_path):
+def test_subset_retries_failed_image_within_same_split(monkeypatch, tmp_path):
     import random as _random_mod
     root = _afad_root_with_images(tmp_path, ("bad.jpg", False), ("good.jpg", True))
     cfg = _cfg(min_age=0, max_age=100, num_classes=101, use_dldl_v2=False)
     dataset = AFADDataset(str(root), transform=lambda image: torch.ones(1), config=cfg)
+    split = torch.utils.data.Subset(dataset, [0, 1])
+    split_set = SubsetWithTransform(split, transform=lambda image: image, retry_on_none=True)
 
-    def always_return_1(low, high):
-        return 1
+    monkeypatch.setattr(_random_mod, "shuffle", lambda values: values.reverse())
 
-    monkeypatch.setattr(_random_mod, "randint", always_return_1)
-
-    result = dataset[0]
+    result = split_set[0]
     assert result is not None
     image, label_dist, age = result
     assert image.shape == (1,)
@@ -145,6 +154,34 @@ def test_afad_dataset_returns_none_after_bounded_failed_fallbacks(monkeypatch, t
         assert dataset[0] is None
 
 
+def test_subset_retry_stays_within_current_split(tmp_path):
+    train_root = tmp_path / "10" / "111"
+    val_root = tmp_path / "20" / "111"
+    train_root.mkdir(parents=True)
+    val_root.mkdir(parents=True)
+    Image.new("RGB", (2, 2), color=(255, 0, 0)).save(train_root / "train.jpg")
+    (val_root / "bad.jpg").write_bytes(b"not an image")
+
+    cfg = _cfg(min_age=0, max_age=100, num_classes=101, use_dldl_v2=False)
+    dataset = AFADDataset(str(tmp_path), transform=lambda image: torch.ones(1), config=cfg)
+    val_split = torch.utils.data.Subset(dataset, [1])
+    val_set = SubsetWithTransform(val_split, transform=lambda image: image, retry_on_none=True)
+
+    with pytest.warns(UserWarning, match="Failed to load image"):
+        assert val_set[0] is None
+
+
+def test_subset_retry_can_be_disabled_for_evaluation(tmp_path):
+    root = _afad_root_with_images(tmp_path, ("bad.jpg", False), ("good.jpg", True))
+    cfg = _cfg(min_age=0, max_age=100, num_classes=101, use_dldl_v2=False)
+    dataset = AFADDataset(str(root), transform=lambda image: torch.ones(1), config=cfg)
+    split = torch.utils.data.Subset(dataset, [0, 1])
+    eval_set = SubsetWithTransform(split, transform=lambda image: image, retry_on_none=False)
+
+    with pytest.warns(UserWarning, match="Failed to load image"):
+        assert eval_set[0] is None
+
+
 def test_collate_filters_none_and_handles_all_empty_batches():
     sample = (torch.ones(1), torch.ones(3), torch.tensor(10.0))
 
@@ -157,6 +194,62 @@ def test_collate_filters_none_and_handles_all_empty_batches():
     assert empty_images.numel() == 0
     assert empty_labels.numel() == 0
     assert empty_ages.numel() == 0
+
+
+def test_strict_collate_rejects_missing_evaluation_samples():
+    sample = (torch.ones(1), torch.ones(3), torch.tensor(10.0))
+
+    with pytest.raises(RuntimeError, match="Evaluation batch contains invalid samples"):
+        strict_collate_fn([None, sample])
+
+
+def test_validation_and_test_loaders_use_strict_collate(monkeypatch, tmp_path):
+    root = _afad_root_with_images(
+        tmp_path,
+        ("a.jpg", True),
+        ("b.jpg", True),
+        ("c.jpg", True),
+    )
+    cfg = _cfg(
+        afad_dir=str(root),
+        img_size=4,
+        min_age=0,
+        max_age=100,
+        num_classes=101,
+        batch_size=2,
+        num_workers=0,
+        use_dldl_v2=False,
+        split_protocol="72-8-20",
+        split_file_tag="pytest_strict_eval",
+        allow_legacy_split_upgrade=False,
+    )
+    monkeypatch.setattr(dataset_module, "ROOT_DIR", str(tmp_path))
+
+    train_loader, val_loader, test_loader, _class_weights = get_dataloaders(cfg)
+
+    assert train_loader.collate_fn is my_collate_fn
+    assert val_loader.collate_fn is strict_collate_fn
+    assert test_loader.collate_fn is strict_collate_fn
+    assert train_loader.dataset.retry_on_none is True
+    assert val_loader.dataset.retry_on_none is False
+    assert test_loader.dataset.retry_on_none is False
+
+
+def test_dataloaders_reject_non_zero_min_age_without_offset_mapping(tmp_path):
+    root = _afad_root_with_images(tmp_path, ("a.jpg", True), ("b.jpg", True), ("c.jpg", True))
+    cfg = _cfg(
+        afad_dir=str(root),
+        min_age=1,
+        max_age=100,
+        num_classes=100,
+        batch_size=2,
+        num_workers=0,
+        use_dldl_v2=False,
+        split_protocol="72-8-20",
+    )
+
+    with pytest.raises(ValueError, match="absolute age encoding"):
+        get_dataloaders(cfg)
 
 
 def test_validation_transform_uses_config_img_size(monkeypatch, tmp_path):

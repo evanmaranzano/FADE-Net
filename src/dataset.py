@@ -33,6 +33,13 @@ def my_collate_fn(batch):
     return torch.utils.data.dataloader.default_collate(batch)
 
 
+def strict_collate_fn(batch):
+    if any(x is None for x in batch):
+        missing = sum(1 for x in batch if x is None)
+        raise RuntimeError(f"Evaluation batch contains invalid samples: {missing}")
+    return torch.utils.data.dataloader.default_collate(batch)
+
+
 def dataset_fingerprint(dataset):
     """Hash dataset order and labels so cached split indices cannot silently drift."""
     digest = hashlib.sha256()
@@ -252,27 +259,25 @@ class AFADDataset(Dataset):
     def __len__(self):
         return len(self.image_paths)
 
+    def _load_exact_item(self, idx):
+        img_path = self.image_paths[idx]
+        age = self.ages[idx]
+        image = Image.open(img_path).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+        label_dist = self.dldl_proc.generate_label_distribution(age)
+        return image, label_dist, torch.tensor(age, dtype=torch.float32)
+
     def __getitem__(self, idx):
         import warnings
-        import random as _random
 
         if len(self.image_paths) == 0:
-            warnings.warn("Failed to load image from empty AFAD dataset")
-            return None
+            raise RuntimeError("AFAD dataset is empty")
 
-        for _attempt in range(3):
-            try_idx = idx if _attempt == 0 else _random.randint(0, len(self.image_paths) - 1)
-            img_path = self.image_paths[try_idx]
-            try:
-                age = self.ages[try_idx]
-                image = Image.open(img_path).convert('RGB')
-                if self.transform:
-                    image = self.transform(image)
-                label_dist = self.dldl_proc.generate_label_distribution(age)
-                return image, label_dist, torch.tensor(age, dtype=torch.float32)
-            except Exception as e:
-                if _attempt == 2:
-                    warnings.warn(f"Failed to load image after 3 attempts: {type(e).__name__}: {e}")
+        try:
+            return self._load_exact_item(idx)
+        except (OSError, FileNotFoundError, ValueError) as e:
+            warnings.warn(f"Failed to load image: {type(e).__name__}: {e}")
         return None
 
 
@@ -282,15 +287,25 @@ class AFADDataset(Dataset):
 # Subset with Transform
 # ==========================================
 class SubsetWithTransform(Dataset):
-    def __init__(self, subset, transform=None, augment_label=False, config=None):
+    def __init__(self, subset, transform=None, augment_label=False, config=None, retry_on_none=False):
         self.subset = subset
         self.transform = transform
         self.augment_label = augment_label
         self.config = config
+        self.retry_on_none = retry_on_none
         self.dldl_proc = DLDLProcessor(config) if config else None
         
     def __getitem__(self, idx):
         item = self.subset[idx]
+        if item is None and self.retry_on_none:
+            retry_indices = list(range(len(self.subset)))
+            random.shuffle(retry_indices)
+            for retry_idx in retry_indices:
+                if retry_idx == idx:
+                    continue
+                item = self.subset[retry_idx]
+                if item is not None:
+                    break
         if item is None: return None
         image, label_dist, age = item
         
@@ -437,6 +452,13 @@ class SafeRandomErasing(object):
 # Main: Get DataLoaders
 # ==========================================
 def get_dataloaders(config):
+    if config.min_age != 0 or config.num_classes != config.max_age + 1:
+        raise ValueError(
+            "Current absolute age encoding requires min_age == 0 and "
+            "num_classes == max_age + 1. Add explicit age-offset mapping before "
+            "using a non-zero min_age."
+        )
+
     image_mean = getattr(config, "image_mean", [0.485, 0.456, 0.406])
     image_std = getattr(config, "image_std", [0.229, 0.224, 0.225])
     fill_mean = tuple(int(round(channel * 255)) for channel in image_mean)
@@ -580,21 +602,44 @@ def get_dataloaders(config):
     
     # Apply Transforms
     # Enable Label Augmentation for Train Set
-    train_set = SubsetWithTransform(train_subset, transform=train_transform, augment_label=True, config=config)
-    val_set = SubsetWithTransform(val_subset, transform=val_transform)
-    test_set = SubsetWithTransform(test_subset, transform=val_transform)
+    train_set = SubsetWithTransform(
+        train_subset,
+        transform=train_transform,
+        augment_label=True,
+        config=config,
+        retry_on_none=True,
+    )
+    val_set = SubsetWithTransform(val_subset, transform=val_transform, retry_on_none=False)
+    test_set = SubsetWithTransform(test_subset, transform=val_transform, retry_on_none=False)
     
     loader_kwargs = {
         "num_workers": config.num_workers,
         "pin_memory": config.device.type == "cuda",
-        "collate_fn": my_collate_fn,
         "persistent_workers": config.num_workers > 0,
     }
 
-    train_loader = DataLoader(train_set, batch_size=config.batch_size, shuffle=True, **loader_kwargs)
+    train_loader = DataLoader(
+        train_set,
+        batch_size=config.batch_size,
+        shuffle=True,
+        collate_fn=my_collate_fn,
+        **loader_kwargs,
+    )
                               
-    val_loader = DataLoader(val_set, batch_size=config.batch_size, shuffle=False, **loader_kwargs)
+    val_loader = DataLoader(
+        val_set,
+        batch_size=config.batch_size,
+        shuffle=False,
+        collate_fn=strict_collate_fn,
+        **loader_kwargs,
+    )
                             
-    test_loader = DataLoader(test_set, batch_size=config.batch_size, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(
+        test_set,
+        batch_size=config.batch_size,
+        shuffle=False,
+        collate_fn=strict_collate_fn,
+        **loader_kwargs,
+    )
                              
     return train_loader, val_loader, test_loader, class_weights

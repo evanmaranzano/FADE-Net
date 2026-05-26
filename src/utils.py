@@ -88,6 +88,13 @@ class DLDLProcessor:
         if not isinstance(age_scalar, torch.Tensor):
             age_scalar = torch.tensor(age_scalar, dtype=torch.float32)
 
+        age_indices = self.age_indices.to(dtype=age_scalar.dtype, device=age_scalar.device)
+        if not self.use_dldl_v2:
+            target = torch.zeros(self.num_classes, dtype=age_scalar.dtype, device=age_scalar.device)
+            class_idx = torch.round(age_scalar).long().clamp(0, self.num_classes - 1)
+            target[class_idx] = 1.0
+            return target
+
         # 动态计算 sigma (年龄越大,sigma 越大)
         if self.use_adaptive_sigma:
             sigma = self.sigma_min + (self.sigma_max - self.sigma_min) * (age_scalar / self.max_age)
@@ -104,7 +111,6 @@ class DLDLProcessor:
 
         # 计算每个年龄节点 j 与 真实年龄 y 的差异
         # $$P(j|x) \propto e^{-\frac{(j-y)^2}{2\sigma^2}}$$
-        age_indices = self.age_indices.to(dtype=age_scalar.dtype, device=age_scalar.device)
         diff = age_indices - age_scalar
         prob_dist = torch.exp(-0.5 * (diff / sigma) ** 2)
 
@@ -142,6 +148,8 @@ class EMAModel:
     def register(self):
         for name, param in self.model.named_parameters():
             self.shadow[name] = param.data.clone()
+        for name, buf in self.model.named_buffers():
+            self.shadow[name] = buf.data.clone()
 
     def update(self):
         for name, param in self.model.named_parameters():
@@ -149,6 +157,10 @@ class EMAModel:
                 raise KeyError(f"EMA update: {name} not in shadow. Was register() called?")
             new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
             self.shadow[name] = new_average.clone()
+        for name, buf in self.model.named_buffers():
+            if name in self.shadow:
+                new_average = (1.0 - self.decay) * buf.data + self.decay * self.shadow[name]
+                self.shadow[name] = new_average.clone()
 
     def apply_shadow(self):
         if self.backup:
@@ -157,13 +169,24 @@ class EMAModel:
             if name not in self.shadow:
                 raise KeyError(f"EMA apply_shadow: {name} not in shadow. Was register() called?")
             self.backup[name] = param.data.clone()
-            param.data = self.shadow[name]
+            with torch.no_grad():
+                param.copy_(self.shadow[name])
+        for name, buf in self.model.named_buffers():
+            if name in self.shadow:
+                self.backup[name] = buf.data.clone()
+                with torch.no_grad():
+                    buf.copy_(self.shadow[name])
 
     def restore(self):
         for name, param in self.model.named_parameters():
             if name not in self.backup:
                 raise KeyError(f"EMA restore: {name} not in backup. Was apply_shadow() called?")
-            param.data = self.backup[name]
+            with torch.no_grad():
+                param.copy_(self.backup[name])
+        for name, buf in self.model.named_buffers():
+            if name in self.backup:
+                with torch.no_grad():
+                    buf.copy_(self.backup[name])
         self.backup = {}
 
 # ==========================================

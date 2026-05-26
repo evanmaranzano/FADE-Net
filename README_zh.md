@@ -67,7 +67,7 @@ FADE-Net/
 │   ├── calc_params.py            # 参数量 / FLOPs 计算
 │   ├── benchmark_speed.py        # 推理速度基准测试
 │   └── preprocess.py             # 数据预处理
-├── tests/                        # 单元测试（12 个测试文件）
+├── tests/                        # 回归与集成测试
 ├── docs/                         # 文档
 │   ├── ablation_plan_v4.md       # 消融实验计划
 │   ├── backbone_screening.md     # 骨干筛选结果
@@ -93,7 +93,7 @@ FADE-Net/
 pip install -r requirements.txt
 ```
 
-核心依赖：`torch>=2.0`、`torchvision`、`timm>=1.0.0`、`numpy`、`pandas`、`scipy`、`opencv-python`、`Pillow`、`tqdm`、`tensorboard`
+核心依赖：`torch>=2.0`（需要 `torch.load(weights_only=True)` 安全加载 checkpoint）、`torchvision`、`timm>=1.0.0`、`numpy`、`pandas`、`scipy`、`opencv-python`、`Pillow`、`tqdm`、`tensorboard`
 
 ### 数据准备
 
@@ -138,7 +138,7 @@ python src/train.py --seed 2026 --split 72-8-20 --split_file_tag formal_v1 --fre
 
 ```bash
 # 高级评估（含 TTA：多尺度 0.9x/1.0x/1.1x + 翻转）
-python scripts/advanced_eval.py --checkpoint best_model.pth
+python scripts/advanced_eval.py --model_path best_model.pth --seed 42 --split 72-8-20 --split_file_tag formal_v1
 
 # 训练可视化
 python scripts/plot_results.py

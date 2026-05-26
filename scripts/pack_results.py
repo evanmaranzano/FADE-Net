@@ -17,6 +17,17 @@ SAFE_FILE_PATTERNS = [
     "docs/backbone_screening_runs.csv",
 ]
 SAFE_DIRS = ["plots", "src"]
+SAFE_PLOT_NAMES = {
+    "1_loss_curve.png",
+    "2_mae_curve.png",
+    "3_lr_schedule.png",
+    "4_generalization_gap.png",
+    "4_kl_loss_gap.png",
+    "5_batch_stability.png",
+    "6_time_efficiency.png",
+    "7_batch_loss_dist.png",
+    "8_loss_lr_combined.png",
+}
 WEIGHT_PATTERNS = [
     "best_model_*.pth",
     "swa_model_*.pth",
@@ -69,6 +80,10 @@ def _safe_to_pack(path, root_dir=ROOT_DIR, allow_weight_file=False):
     return True
 
 
+def _safe_plot_file(path, root_dir=ROOT_DIR):
+    return Path(path).name in SAFE_PLOT_NAMES and _safe_to_pack(path, root_dir=root_dir)
+
+
 def pack_results(output=None, include_weights=False, overwrite=False):
     root_dir = str(ROOT_DIR)
 
@@ -108,7 +123,12 @@ def pack_results(output=None, include_weights=False, overwrite=False):
                 dirs[:] = [d for d in dirs if d != "__pycache__"]
                 for file in files:
                     file_path = os.path.join(root, file)
-                    if not _safe_to_pack(file_path, root_dir=ROOT_DIR):
+                    is_safe = (
+                        _safe_plot_file(file_path, root_dir=ROOT_DIR)
+                        if dirname == "plots"
+                        else _safe_to_pack(file_path, root_dir=ROOT_DIR)
+                    )
+                    if not is_safe:
                         continue
                     arcname = os.path.relpath(file_path, root_dir)
                     print(f"  Adding: {arcname}")

@@ -1,4 +1,4 @@
-torch>=2.0.0
+torch>=2.0.0  # requires torch.load(weights_only=True) for safe checkpoint loading
 torchvision>=0.15.0
 timm>=1.0.0
 numpy<2
@@ -11,3 +11,9 @@ mediapipe
 streamlit
 tensorboard
 PyQt5
+thop
+psutil
+matplotlib
+seaborn
+pytest
+python-docx

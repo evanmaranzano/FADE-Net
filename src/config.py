@@ -31,7 +31,7 @@ class Config:
     allow_legacy_split_upgrade = False
     head_version = "fade-head-v2"
     hybrid_attention_blocks = 4
-    msff_feature_indices = (6, 12)
+    msff_feature_indices = (1, 3)
     fusion_dim = 64
     fusion_out_dim = 128
     spp_channels = 512

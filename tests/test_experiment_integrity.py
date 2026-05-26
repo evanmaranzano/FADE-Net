@@ -464,6 +464,31 @@ class ExperimentIntegrityTests(unittest.TestCase):
 
         self.assertIn("regularization_schedule", {key for key, _, _ in mismatches})
 
+    def test_training_strategy_drift_is_a_metadata_mismatch(self):
+        cfg_a = self.make_config()
+        cfg_b = self.make_config()
+        cfg_b.batch_size = cfg_a.batch_size + 1
+        cfg_b.learning_rate = cfg_a.learning_rate * 2
+
+        mismatches = checkpoint_metadata_mismatches(
+            {"metadata": build_training_metadata(cfg_a, seed=42)},
+            build_training_metadata(cfg_b, seed=42),
+        )
+
+        self.assertIn("training", {key for key, _, _ in mismatches})
+
+    def test_ema_strategy_drift_is_a_metadata_mismatch(self):
+        cfg_a = self.make_config()
+        cfg_b = self.make_config()
+        cfg_b.ema_decay = 0.5
+
+        mismatches = checkpoint_metadata_mismatches(
+            {"metadata": build_training_metadata(cfg_a, seed=42)},
+            build_training_metadata(cfg_b, seed=42),
+        )
+
+        self.assertIn("ema", {key for key, _, _ in mismatches})
+
     def test_missing_regularization_schedule_is_compatible_with_default_only(self):
         cfg_default = self.make_config()
         default_meta = build_training_metadata(cfg_default, seed=42)

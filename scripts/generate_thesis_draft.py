@@ -306,6 +306,9 @@ def generate_architecture_diagram(output_path: Path) -> None:
 
 def generate_age_distribution_chart(output_path: Path) -> None:
     dataset_dir = ROOT_DIR / "datasets" / "AFAD"
+    if not dataset_dir.exists():
+        generate_placeholder_chart(output_path, "AFAD dataset directory not found")
+        return
     ages = []
     counts = []
     for age_dir in sorted(dataset_dir.iterdir(), key=lambda p: int(p.name) if p.name.isdigit() else 10**9):
@@ -314,6 +317,9 @@ def generate_age_distribution_chart(output_path: Path) -> None:
             if count > 0:
                 ages.append(int(age_dir.name))
                 counts.append(count)
+    if not counts:
+        generate_placeholder_chart(output_path, "AFAD dataset directory contains no images")
+        return
 
     width, height = 1800, 900
     margin_left, margin_right = 120, 60
@@ -357,6 +363,14 @@ def generate_age_distribution_chart(output_path: Path) -> None:
 
     draw.text((width // 2 - 30, height - 52), "Age", font=text_font, fill="#2F2F2F")
     draw.text((margin_left - 85, margin_top - 55), "Samples", font=text_font, fill="#2F2F2F")
+    image.save(output_path)
+
+
+def generate_placeholder_chart(output_path: Path, message: str) -> None:
+    image = Image.new("RGB", (1800, 900), "white")
+    draw = ImageDraw.Draw(image)
+    title_font = load_font(38, bold=True)
+    draw_centered_text(draw, (100, 350, 1700, 550), message, title_font)
     image.save(output_path)
 
 

@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 from PIL import Image
 
 # Add project root to path to allow imports from src
@@ -81,21 +82,35 @@ def process_afad(source_root, target_root, img_size=224):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Preprocess AFAD into datasets/AFAD")
+    parser.add_argument(
+        "--afad_dir",
+        default=os.environ.get("FADE_NET_AFAD_DIR"),
+        help="Raw AFAD-Full directory. Defaults to FADE_NET_AFAD_DIR.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default=os.path.join(PROJECT_ROOT, "datasets"),
+        help="Output base directory; AFAD images are written under output_dir/AFAD.",
+    )
+    args = parser.parse_args()
+
     print("[INFO] Start preprocessing (no face alignment).", flush=True)
     cfg = Config()
-    base_output_dir = os.path.join(PROJECT_ROOT, "datasets")
+    base_output_dir = os.path.abspath(args.output_dir)
+    raw_afad_dir = os.path.abspath(args.afad_dir) if args.afad_dir else None
 
-    # Adjust this path to your AFAD raw dataset location.
-    raw_afad_dir = r"F:\QQFiles\Study\shit\tarball\tarball-master\AFAD-Full.tar\AFAD-Full~\AFAD-Full"
-
-    if os.path.exists(raw_afad_dir):
+    if raw_afad_dir and os.path.exists(raw_afad_dir):
         process_afad(
             source_root=raw_afad_dir,
             target_root=os.path.join(base_output_dir, "AFAD"),
             img_size=cfg.img_size,
         )
     else:
-        print(f"[WARN] AFAD source folder not found: {raw_afad_dir}", flush=True)
+        print(
+            "[WARN] AFAD source folder not found. Pass --afad_dir or set FADE_NET_AFAD_DIR.",
+            flush=True,
+        )
 
     print(f"[DONE] Preprocessing completed. Output: {base_output_dir}", flush=True)
 

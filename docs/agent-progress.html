@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FADE-Net Agent Progress Report</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #111417;
+      --muted: #5d6670;
+      --line: #d9dee4;
+      --paper: #f7f8f6;
+      --panel: #ffffff;
+      --accent: #0f766e;
+      --accent-2: #b42318;
+      --ok: #157347;
+      --warn: #9a6700;
+      --code: #f0f3f5;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+      line-height: 1.58;
+    }
+
+    header {
+      min-height: 58vh;
+      display: grid;
+      align-items: end;
+      padding: 56px clamp(22px, 7vw, 92px);
+      background:
+        linear-gradient(110deg, rgba(17, 20, 23, 0.94), rgba(17, 20, 23, 0.76)),
+        repeating-linear-gradient(90deg, #1a2428 0 1px, #101416 1px 26px);
+      color: #f8fbf9;
+    }
+
+    .hero {
+      max-width: 980px;
+    }
+
+    .eyebrow {
+      margin: 0 0 18px;
+      font-size: 13px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #9de2d7;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(40px, 7vw, 86px);
+      line-height: 0.98;
+      letter-spacing: 0;
+      max-width: 900px;
+    }
+
+    .hero p {
+      margin: 24px 0 0;
+      max-width: 720px;
+      font-size: clamp(17px, 2vw, 22px);
+      color: #dce7e4;
+    }
+
+    main {
+      padding: 0 clamp(18px, 5vw, 72px) 72px;
+    }
+
+    section {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 44px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h2 {
+      margin: 0 0 22px;
+      font-size: clamp(26px, 3vw, 42px);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin: 28px 0 10px;
+      font-size: 18px;
+    }
+
+    p {
+      margin: 0 0 14px;
+      color: var(--muted);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+    }
+
+    .metric {
+      min-height: 134px;
+      padding: 22px;
+      background: var(--panel);
+    }
+
+    .metric strong {
+      display: block;
+      font-size: clamp(28px, 4vw, 48px);
+      line-height: 1;
+      color: var(--accent);
+      margin-bottom: 10px;
+    }
+
+    .metric span {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+      gap: clamp(24px, 5vw, 68px);
+      align-items: start;
+    }
+
+    .timeline {
+      border-left: 2px solid var(--accent);
+      padding-left: 24px;
+    }
+
+    .item {
+      position: relative;
+      margin-bottom: 24px;
+    }
+
+    .item::before {
+      content: "";
+      position: absolute;
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      left: -31px;
+      top: 7px;
+      background: var(--accent);
+      box-shadow: 0 0 0 5px var(--paper);
+    }
+
+    .item h3 {
+      margin: 0 0 4px;
+      font-size: 16px;
+      line-height: 1.4;
+    }
+
+    .file-list,
+    .risk-list,
+    .command-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+
+    .file-list li,
+    .risk-list li {
+      padding: 13px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    code {
+      font-family: Consolas, "Cascadia Mono", monospace;
+      background: var(--code);
+      border: 1px solid #dfe5ea;
+      padding: 2px 6px;
+      border-radius: 4px;
+      color: #24313a;
+    }
+
+    .command-list li {
+      font-family: Consolas, "Cascadia Mono", monospace;
+      background: #101416;
+      color: #eef8f6;
+      padding: 12px 14px;
+      margin-bottom: 8px;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+
+    .status-ok {
+      color: var(--ok);
+      font-weight: 700;
+    }
+
+    .status-warn {
+      color: var(--warn);
+      font-weight: 700;
+    }
+
+    .status-risk {
+      color: var(--accent-2);
+      font-weight: 700;
+    }
+
+    .bar {
+      height: 16px;
+      background: #e4e8eb;
+      margin-top: 14px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .bar > span {
+      display: block;
+      height: 100%;
+      width: 83%;
+      background: var(--accent);
+    }
+
+    footer {
+      max-width: 1160px;
+      margin: 0 auto;
+      padding: 30px clamp(18px, 5vw, 72px) 64px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 840px) {
+      header {
+        min-height: 50vh;
+      }
+
+      .metrics,
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="hero">
+      <p class="eyebrow">FADE-Net / Agent Progress / 2026-05-23</p>
+      <h1>刚刚完成的项目审查、修复与性能优化</h1>
+      <p>本轮没有跑完整训练；重点是深读项目、修复可复现问题、优化评估端 TTA 推理性能，并用轻量测试闭环验证。</p>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <div class="metrics">
+        <div class="metric">
+          <strong>101</strong>
+          <span>全量测试通过数量</span>
+        </div>
+        <div class="metric">
+          <strong>83%</strong>
+          <span>最终复测 TTA 延迟下降，约 105.201ms 到 18.096ms</span>
+        </div>
+        <div class="metric">
+          <strong>6</strong>
+          <span>相关产物文件变更，包括进度文档</span>
+        </div>
+        <div class="metric">
+          <strong>0</strong>
+          <span>发现的无关工作区改动</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="two-col">
+      <div>
+        <h2>我做了什么</h2>
+        <p>先读项目结构、README、依赖、测试入口和核心代码，再按一组一组的小改动推进。每组改完都跑了对应验证，没有跳过失败。</p>
+      </div>
+      <div class="timeline">
+        <div class="item">
+          <h3>1. 环境与基线确认</h3>
+          <p>确认全局 Python 不适合本项目；正式验证统一切到 <code>.venv/Scripts/python.exe</code>。</p>
+        </div>
+        <div class="item">
+          <h3>2. 修复 timm 预训练加载失败</h3>
+          <p>默认 backbone 在网络或代理异常时会尝试下载权重，失败后现在会回退到随机权重，避免测试和轻量运行直接崩溃。</p>
+        </div>
+        <div class="item">
+          <h3>3. 优化 TTA 推理性能</h3>
+          <p>把 <code>multi</code> TTA 的 6 次顺序 forward 改为增强视图批量推理，并加入安全分块。</p>
+        </div>
+        <div class="item">
+          <h3>4. 增强评估创新性</h3>
+          <p>新增 TTA 年龄不确定性输出，<code>advanced_eval.py --uncertainty</code> 可报告增强视图间年龄预测分歧。</p>
+        </div>
+        <div class="item">
+          <h3>5. 写入进度文档</h3>
+          <p>生成 <code>docs/agent-progress.md</code>，记录文件、命令、问题和风险。</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>改动文件</h2>
+      <ul class="file-list">
+        <li><code>src/backbones.py</code>：timm 预训练权重失败时回退随机权重。</li>
+        <li><code>src/evaluation.py</code>：批量 TTA、分块推理、TTA 年龄不确定性。</li>
+        <li><code>scripts/advanced_eval.py</code>：新增 <code>--uncertainty</code> 和参数冲突检查。</li>
+        <li><code>tests/test_research_refactor.py</code>：补 timm fallback 回归测试。</li>
+        <li><code>tests/test_experiment_integrity.py</code>：补 TTA 批量、分块、等价性、不确定性测试。</li>
+        <li><code>docs/agent-progress.md</code>：本轮工作记录。</li>
+        <li><code>docs/agent-progress.html</code>：当前这份 HTML 汇报。</li>
+      </ul>
+    </section>
+
+    <section class="two-col">
+      <div>
+        <h2>性能结果</h2>
+        <p>性能提升口径是推理/评估端 TTA latency，不是完整训练后的 MAE 提升。</p>
+        <p><span class="status-ok">修改前：</span><code>multi sequential_latency_ms=105.201</code></p>
+        <p><span class="status-ok">修改后：</span><code>multi batched_latency_ms=18.096</code></p>
+        <div class="bar" role="progressbar" aria-valuenow="83" aria-valuemin="0" aria-valuemax="100" aria-label="TTA 延迟下降 83%"><span></span></div>
+        <p>最终复测约 83% 延迟下降（约 5.8x），超过目标中的 20% 轻量性能优化要求。</p>
+        <p>测试条件：<code>batch_size=1</code>，6 个增强视图拼成单 batch。大 batch 场景加速比会降低（如 batch_size=128 时约 2x）。</p>
+      </div>
+      <div>
+        <h2>验证结果</h2>
+        <p><span class="status-ok">通过：</span>全量测试、语法编译、diff 检查、脚本帮助、参数冲突检查。</p>
+        <p><span class="status-warn">提醒：</span><code>git diff --check</code> 只出现 Windows CRLF 提示，不是 whitespace error。</p>
+      </div>
+    </section>
+
+    <section>
+      <h2>关键命令</h2>
+      <ul class="command-list">
+        <li>./.venv/Scripts/python.exe -m pytest tests/ -q</li>
+        <li>./.venv/Scripts/python.exe -m compileall -q src scripts tests</li>
+        <li>git diff --check</li>
+        <li>./.venv/Scripts/python.exe scripts/advanced_eval.py --help</li>
+        <li>./.venv/Scripts/python.exe scripts/advanced_eval.py --ensemble --uncertainty</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>剩余风险</h2>
+      <ul class="risk-list">
+        <li><span class="status-risk">未跑完整训练：</span>最终 MAE、收敛曲线、论文主表结果仍需正式训练验证。</li>
+        <li><span class="status-risk">TTA 批量显存：</span>默认有安全分块，但极小显存环境可能需要设置 <code>config.tta_batch_size</code>。</li>
+        <li><span class="status-risk">不确定性含义：</span><code>--uncertainty</code> 是 TTA 视图分歧，不等于经过校准的预测置信度。</li>
+        <li><span class="status-risk">Demo 侧重复 TTA：</span><code>src/gui_demo.py</code> 和 <code>src/web_demo.py</code> 仍有各自 TTA 实现，本轮没有扩大到 UI 重构。</li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    静态文件路径：F:/FADE-Net/docs/agent-progress.html
+  </footer>
+</body>
+</html>
