@@ -12,6 +12,7 @@ sys.path.insert(0, str(SRC_DIR))
 import train as train_module
 from train import (
     SchedulerStepController,
+    _to_float,
     backbone_learning_rate,
     checkpoint_extra_state,
     hard_distillation_start_epoch,
@@ -26,6 +27,13 @@ from train import (
 def test_backbone_learning_rate_uses_full_lr_without_loaded_pretraining():
     assert backbone_learning_rate(3e-4, effective_pretrained=False) == pytest.approx(3e-4)
     assert backbone_learning_rate(3e-4, effective_pretrained=True) == pytest.approx(3e-5)
+
+
+def test_to_float_handles_tensor_and_float():
+    assert isinstance(_to_float(torch.tensor(3.14)), float)
+    assert _to_float(torch.tensor(3.14)) == pytest.approx(3.14)
+    assert isinstance(_to_float(2.718), float)
+    assert _to_float(2.718) == pytest.approx(2.718)
 
 
 class _RecorderModel:
@@ -109,8 +117,22 @@ def test_scheduler_controller_replays_deferred_steps_after_amp_skip():
 
     assert controller.step_epoch(epoch=0, optimizer_stepped=False) == 0
     assert scheduler.steps == 0
-    assert controller.step_epoch(epoch=1, optimizer_stepped=True) == 2
-    assert scheduler.steps == 2
+    # After AMP skip, only 1 step is applied (no burst)
+    assert controller.step_epoch(epoch=1, optimizer_stepped=True) == 1
+    assert scheduler.steps == 1
+    assert controller.pending_steps == 0
+
+
+def test_scheduler_controller_caps_at_one_after_multiple_amp_skips():
+    scheduler = _Scheduler()
+    controller = SchedulerStepController(scheduler, max_epochs=100)
+
+    assert controller.step_epoch(epoch=0, optimizer_stepped=False) == 0
+    assert controller.step_epoch(epoch=1, optimizer_stepped=False) == 0
+    assert controller.step_epoch(epoch=2, optimizer_stepped=False) == 0
+    assert controller.pending_steps == 3
+    assert controller.step_epoch(epoch=3, optimizer_stepped=True) == 1
+    assert scheduler.steps == 1
     assert controller.pending_steps == 0
 
 
@@ -291,7 +313,8 @@ class _SmokeCriterion(torch.nn.Module):
 
     def forward(self, log_probs, target_dists, true_ages, logits, embeddings=None, extras=None):
         loss = logits.sum() * 0 + 1.0
-        return loss, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+        pred_age = torch.zeros(log_probs.shape[0])
+        return loss, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, pred_age
 
 
 class _SmokeWriter:

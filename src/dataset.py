@@ -1,5 +1,6 @@
 import os
 import math
+import warnings
 import torch
 import numpy as np
 import json
@@ -36,7 +37,10 @@ def my_collate_fn(batch):
 def strict_collate_fn(batch):
     if any(x is None for x in batch):
         missing = sum(1 for x in batch if x is None)
-        raise RuntimeError(f"Evaluation batch contains invalid samples: {missing}")
+        warnings.warn(f"Evaluation batch dropping {missing} invalid samples (corrupt images)")
+        batch = [x for x in batch if x is not None]
+        if len(batch) == 0:
+            return torch.tensor([]), torch.tensor([]), torch.tensor([])
     return torch.utils.data.dataloader.default_collate(batch)
 
 

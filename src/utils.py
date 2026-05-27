@@ -147,46 +147,32 @@ class EMAModel:
 
     def register(self):
         for name, param in self.model.named_parameters():
-            self.shadow[name] = param.data.clone()
-        for name, buf in self.model.named_buffers():
-            self.shadow[name] = buf.data.clone()
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
 
     def update(self):
         for name, param in self.model.named_parameters():
             if name not in self.shadow:
-                raise KeyError(f"EMA update: {name} not in shadow. Was register() called?")
+                continue
             new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
-            self.shadow[name] = new_average.clone()
-        for name, buf in self.model.named_buffers():
-            if name in self.shadow:
-                new_average = (1.0 - self.decay) * buf.data + self.decay * self.shadow[name]
-                self.shadow[name] = new_average.clone()
+            self.shadow[name] = new_average
 
     def apply_shadow(self):
         if self.backup:
             raise RuntimeError("EMA apply_shadow() called before restore().")
         for name, param in self.model.named_parameters():
             if name not in self.shadow:
-                raise KeyError(f"EMA apply_shadow: {name} not in shadow. Was register() called?")
+                continue
             self.backup[name] = param.data.clone()
             with torch.no_grad():
                 param.copy_(self.shadow[name])
-        for name, buf in self.model.named_buffers():
-            if name in self.shadow:
-                self.backup[name] = buf.data.clone()
-                with torch.no_grad():
-                    buf.copy_(self.shadow[name])
 
     def restore(self):
         for name, param in self.model.named_parameters():
             if name not in self.backup:
-                raise KeyError(f"EMA restore: {name} not in backup. Was apply_shadow() called?")
+                continue
             with torch.no_grad():
                 param.copy_(self.backup[name])
-        for name, buf in self.model.named_buffers():
-            if name in self.backup:
-                with torch.no_grad():
-                    buf.copy_(self.backup[name])
         self.backup = {}
 
 # ==========================================
@@ -463,22 +449,19 @@ class CombinedLoss(nn.Module):
         return F.kl_div(gate_usage.log(), target_usage, reduction='sum')
 
     def forward(self, log_probs, target_dists, true_ages, logits, embeddings=None, extras=None):
-        # 1. KL 散度 (Main Loss)
-        kl = self.kl_loss(log_probs, target_dists)
-        
-        # 2. Re-weighting (LDS)
+        # 1. KL 散度 (Main Loss) + 2. Re-weighting (LDS)
         if self.weights is not None:
             weights = self.weights.to(log_probs.device)
             element_kl = F.kl_div(log_probs, target_dists, reduction='none').sum(dim=1)
             batch_weights = torch.matmul(target_dists.to(log_probs.device), weights)
             w_kl = (element_kl * batch_weights).mean()
         else:
-            w_kl = kl
-            
+            w_kl = self.kl_loss(log_probs, target_dists)
+
         # 3. L1 Loss (Auxiliary)
         probs = torch.exp(log_probs)
         pred_age = self.dldl.expectation_regression(probs)
-        
+
         if self.weights is not None:
              # L1 Loss should also be re-weighted to focus on rare ages
              l1_element = F.l1_loss(pred_age, true_ages, reduction='none')
@@ -487,7 +470,7 @@ class CombinedLoss(nn.Module):
              l1 = F.l1_loss(pred_age, true_ages)
 
         # M3: Asymmetric Ordinal Loss (kept separate from the standard L1 term).
-        loss_asym = torch.tensor(0.0).to(log_probs.device)
+        loss_asym = torch.tensor(0.0, device=log_probs.device)
         if self.use_asymmetric_ordinal:
             loss_asym = self.asym_loss_fn(pred_age, true_ages)
             term_asym = self.lambda_asym * loss_asym
@@ -501,11 +484,11 @@ class CombinedLoss(nn.Module):
             rank_loss = self.rank_loss_fn(logits, true_ages, target_dists)
             term_rank = self.lambda_rank * rank_loss
         else:
-            rank_loss = torch.tensor(0.0).to(log_probs.device)
+            rank_loss = torch.tensor(0.0, device=log_probs.device)
             term_rank = 0.0
             
         # 5. Mean-Variance Loss
-        loss_mv = torch.tensor(0.0).to(log_probs.device)
+        loss_mv = torch.tensor(0.0, device=log_probs.device)
         if self.use_mv_loss:
             # MV Loss internal logic: L_mean + lambda_var * L_var
             # We add it with a global weight 'lambda_mv'
@@ -515,7 +498,7 @@ class CombinedLoss(nn.Module):
             term_mv = 0.0
 
         # M2: Adaptive Triplet Loss
-        loss_triplet = torch.tensor(0.0).to(log_probs.device)
+        loss_triplet = torch.tensor(0.0, device=log_probs.device)
         if self.use_adaptive_triplet:
             triplet_embeddings = embeddings if embeddings is not None else logits
             loss_triplet = self.triplet_loss_fn(triplet_embeddings, true_ages)
@@ -524,31 +507,33 @@ class CombinedLoss(nn.Module):
             term_triplet = 0.0
 
         # M5: age-bin supervision keeps MoE routing tied to age ranges.
-        loss_moe_gate = torch.tensor(0.0).to(log_probs.device)
+        loss_moe_gate = torch.tensor(0.0, device=log_probs.device)
         if self.use_moe and extras and extras.get("moe_gate_logits") is not None:
             gate_targets = self._moe_gate_targets(target_dists, log_probs.device)
             gate_log_probs = F.log_softmax(extras["moe_gate_logits"], dim=1)
             gate_probs = torch.exp(gate_log_probs)
             loss_moe_gate = F.kl_div(gate_log_probs, gate_targets, reduction='batchmean')
             loss_moe_balance = self._moe_batch_balance_loss(gate_probs, target_dists, log_probs.device)
-            logged_moe_gate = self.lambda_moe_gate * loss_moe_gate + self.lambda_moe_balance * loss_moe_balance
+            logged_moe_gate = loss_moe_gate.detach()
             term_moe_gate = self.lambda_moe_gate * loss_moe_gate + self.lambda_moe_balance * loss_moe_balance
         else:
-            logged_moe_gate = loss_moe_gate
+            logged_moe_gate = loss_moe_gate.detach()
             term_moe_gate = 0.0
 
         # 总损失
         l1_term = 0.0 if self.use_asymmetric_ordinal else self.lambda_l1 * l1
         total_loss = w_kl + l1_term + term_rank + term_mv + term_triplet + term_asym + term_moe_gate
         logged_l1 = l1_term if isinstance(l1_term, torch.Tensor) else torch.tensor(l1_term, device=log_probs.device)
-        # Return 8-tuple: (total, kl, l1, rank, mv, triplet, asym, moe_gate)
+        # Return tuple: (total, kl, l1, rank, mv, triplet, asym, moe_gate, pred_age)
+        # total_loss retains grad_fn; others are detached tensors for logging
         return (
             total_loss,
-            w_kl.detach().item(),
-            logged_l1.detach().item(),
-            rank_loss.detach().item(),
-            loss_mv.detach().item(),
-            loss_triplet.detach().item(),
-            loss_asym.detach().item(),
-            logged_moe_gate.detach().item(),
+            w_kl.detach(),
+            logged_l1.detach(),
+            rank_loss.detach(),
+            loss_mv.detach(),
+            loss_triplet.detach(),
+            loss_asym.detach(),
+            logged_moe_gate.detach(),
+            pred_age.detach(),
         )

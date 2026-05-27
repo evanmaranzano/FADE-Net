@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -19,7 +21,7 @@ def normalize_tta_mode(mode: str) -> str:
 
 
 def _resize_for_scale(images, scale: float, base_size: int):
-    if scale == 1.0:
+    if math.isclose(scale, 1.0):
         return images
 
     new_size = int(base_size * scale)

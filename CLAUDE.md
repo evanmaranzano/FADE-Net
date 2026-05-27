@@ -26,8 +26,16 @@ python -m pytest tests/test_core_regressions.py tests/test_training_loop_regress
 ## 测试环境
 - 独立 conda env: `conda activate fade-net`（Python 3.11 + PyTorch 2.5.1+cu121 + timm 1.0.27 + numpy 1.26.4）
 - base Anaconda 有 NumPy 2.x 冲突，必须用 fade-net env
-- 167 测试全通过；无 timm 时跳过依赖 timm 的测试
+- 188 测试全通过；无 timm 时跳过依赖 timm 的测试
+- 运行: `F:/Anaconda/envs/fade-net/python.exe -m pytest tests/ -x -q --tb=short`
 - 创建 env: `conda create -n fade-net python=3.11 && conda run -n fade-net pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 && conda run -n fade-net pip install "numpy<2" timm pandas scipy opencv-python Pillow tqdm tensorboard matplotlib seaborn psutil pytest`
+
+## 核心 API 契约（修改前必读）
+- `CombinedLoss.forward` 返回 9-tuple: `(total, kl, l1, rank, mv, triplet, asym, moe_gate, pred_age)`，loss 分量为 detached tensor（非 float），日志用 `_to_float(v)`
+- `EMAModel` 仅跟踪 `requires_grad=True` 的参数，不含 buffers；在 freeze 逻辑之前创建；`update()` 无冗余 `.clone()`
+- `strict_collate_fn` 对 None 样本 warn+skip 而非 crash；全 None 返回空 tensor
+- `SchedulerStepController.step_epoch` cap=1，AMP 跳步后不 burst 回放
+- `swa_average.py` 必须用 `build_model_for_checkpoint_load(cfg)` + `load_state_dict` + `to(device)`，不能直接 `LightweightAgeEstimator(cfg)`
 
 ## Checkpoint 兼容性
 - `remap_state_dict_keys()` 处理 buffer 重命名（imagenet_mean/std → image_mean/std）

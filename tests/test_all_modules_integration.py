@@ -38,11 +38,16 @@ def test_all_loss_modules_enabled():
     true_ages = torch.tensor([10.0, 30.0, 50.0, 70.0])
     embeddings = torch.randn(4, 128)
     result = criterion(log_probs, target_dists, true_ages, logits, embeddings=embeddings)
-    assert len(result) == 8, f"Expected 8 return values, got {len(result)}"
+    assert len(result) == 9, f"Expected 9 return values, got {len(result)}"
     total_loss = result[0]
     assert total_loss.dim() == 0
     assert total_loss.item() > 0
-    assert result[6] > 0
+    assert result[6].item() > 0
+
+    pred_age = result[8]
+    assert isinstance(pred_age, torch.Tensor)
+    assert pred_age.shape == (4,)
+    assert not pred_age.requires_grad
 
 
 def test_each_model_module_independently():
@@ -85,7 +90,7 @@ def test_model_plus_loss_integration():
     target_dists = torch.softmax(torch.randn(4, 81), dim=1)
     true_ages = torch.tensor([10.0, 30.0, 50.0, 70.0])
     result = criterion(log_probs, target_dists, true_ages, logits, embeddings=embeddings, extras=extras)
-    assert len(result) == 8
+    assert len(result) == 9
     total_loss = result[0]
     total_loss.backward()  # Verify gradients flow
     print(f"Full pipeline loss: {total_loss.item():.4f}")

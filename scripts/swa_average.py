@@ -26,6 +26,7 @@ from model import LightweightAgeEstimator
 from dataset import get_dataloaders
 from experiment import (
     artifact_path,
+    build_model_for_checkpoint_load,
     build_training_metadata,
     checkpoint_metadata_mismatches,
     load_model_state_package,
@@ -189,7 +190,7 @@ def main():
         if args.eval:
             print(f"\n📊 Evaluating SWA model...")
             
-            model = LightweightAgeEstimator(cfg)
+            model = build_model_for_checkpoint_load(cfg)
             model.load_state_dict(remap_state_dict_keys(avg_state))
             model.to(device)
             

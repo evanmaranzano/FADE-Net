@@ -86,9 +86,9 @@ def backbone_signature(config) -> dict[str, Any]:
         "name": getattr(config, "backbone_name", "mobilenet_v3_large"),
         "pretrained": bool(getattr(config, "backbone_pretrained", True)),
         "effective_pretrained": bool(getattr(config, "effective_pretrained", getattr(config, "backbone_pretrained", True))),
-        "msff_feature_indices": _list_value(getattr(config, "msff_feature_indices", (6, 12))),
+        "msff_feature_indices": _list_value(getattr(config, "msff_feature_indices", (1, 3))),
         "effective_msff_feature_indices": _list_value(
-            getattr(config, "effective_msff_feature_indices", getattr(config, "msff_feature_indices", (6, 12)))
+            getattr(config, "effective_msff_feature_indices", getattr(config, "msff_feature_indices", (1, 3)))
         ),
         "effective_msff_channels": _list_value(getattr(config, "effective_msff_channels", [])),
         "effective_msff_spatial": _list_value(getattr(config, "effective_msff_spatial", [])),

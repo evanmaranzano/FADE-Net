@@ -79,19 +79,17 @@ def test_no_dldl_uses_one_hot_age_targets():
     assert torch.isclose(dist.sum(), torch.tensor(1.0), atol=1e-6)
 
 
-def test_ema_registers_frozen_params_before_unfreeze():
+def test_ema_skips_frozen_params():
     model = torch.nn.Linear(2, 1)
     model.weight.requires_grad = False
     ema = EMAModel(model, decay=0.9)
-    initial_shadow = ema.shadow["weight"].clone()
+
+    assert "weight" not in ema.shadow
+    assert "bias" in ema.shadow
 
     model.weight.requires_grad = True
-    model.weight.data.add_(1.0)
-    ema.update()
-
+    ema.register()
     assert "weight" in ema.shadow
-    assert not torch.equal(ema.shadow["weight"], model.weight.data)
-    assert torch.allclose(ema.shadow["weight"], 0.1 * model.weight.data + 0.9 * initial_shadow)
 
 
 def test_ema_apply_shadow_rejects_double_apply():
@@ -114,7 +112,7 @@ def test_asymmetric_ordinal_reports_l1_contribution_not_raw_l1():
 
     result = criterion(log_probs, target_dists, true_ages, logits)
 
-    assert result[2] == 0.0
+    assert result[2].item() == 0.0
 
 
 def _afad_root_with_images(tmp_path, *images):
@@ -196,11 +194,52 @@ def test_collate_filters_none_and_handles_all_empty_batches():
     assert empty_ages.numel() == 0
 
 
-def test_strict_collate_rejects_missing_evaluation_samples():
+def test_strict_collate_warns_on_missing_evaluation_samples():
     sample = (torch.ones(1), torch.ones(3), torch.tensor(10.0))
 
-    with pytest.raises(RuntimeError, match="Evaluation batch contains invalid samples"):
-        strict_collate_fn([None, sample])
+    with pytest.warns(UserWarning, match="Evaluation batch dropping"):
+        result = strict_collate_fn([None, sample])
+    assert result[0].shape[0] == 1
+
+
+def test_strict_collate_returns_empty_tensors_on_all_none():
+    with pytest.warns(UserWarning, match="Evaluation batch dropping"):
+        result = strict_collate_fn([None, None])
+    assert len(result) == 3
+    for t in result:
+        assert t.numel() == 0
+
+
+def test_ema_apply_shadow_restore_with_frozen_params():
+    model = torch.nn.Linear(4, 2)
+    model.weight.requires_grad = False
+    ema = EMAModel(model, decay=0.9)
+
+    assert "weight" not in ema.shadow
+    assert "bias" in ema.shadow
+
+    original_bias = model.bias.data.clone()
+    ema.update()
+    ema.apply_shadow()
+
+    assert torch.equal(model.bias.data, ema.shadow["bias"])
+    assert torch.equal(model.weight.data, model.weight.data)
+
+    ema.restore()
+    assert torch.equal(model.bias.data, original_bias)
+
+
+def test_ema_update_skips_frozen_params():
+    model = torch.nn.Linear(4, 2)
+    model.weight.requires_grad = False
+    ema = EMAModel(model, decay=0.9)
+    frozen_weight = model.weight.data.clone()
+
+    model.bias.data.add_(1.0)
+    ema.update()
+
+    assert torch.equal(model.weight.data, frozen_weight)
+    assert "weight" not in ema.shadow
 
 
 def test_validation_and_test_loaders_use_strict_collate(monkeypatch, tmp_path):

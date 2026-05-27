@@ -156,11 +156,10 @@ class SchedulerStepController:
             self.pending_steps += 1
         if not optimizer_stepped or self.pending_steps == 0:
             return 0
-        steps = self.pending_steps
-        for _ in range(steps):
-            self.scheduler.step()
+        # Cap at 1 to avoid abrupt LR burst after consecutive AMP skips
+        self.scheduler.step()
         self.pending_steps = 0
-        return steps
+        return 1
 
 
 # ==========================================
@@ -220,10 +219,18 @@ def _guard_fresh_artifact_overwrite(paths, expected_metadata, device, allow_over
         )
 
 
+def _to_float(v):
+    return v.item() if hasattr(v, 'item') else float(v)
+
+
 def _average_loss_sums(loss_sums, sample_count):
     if sample_count <= 0:
         raise ValueError(f"sample_count must be positive, got {sample_count}")
-    return {name: value / sample_count for name, value in loss_sums.items()}
+    result = {}
+    for name, value in loss_sums.items():
+        v = value / sample_count
+        result[name] = v.item() if hasattr(v, 'item') else v
+    return result
 
 
 def _accumulate_loss_components(loss_sums, batch_size, total_loss, kl_loss, l1_loss=0.0, rank_loss=0.0, mv_loss=0.0, triplet_loss=0.0, asym_loss=0.0, moe_gate_loss=0.0):
@@ -590,10 +597,6 @@ def train(args):
                     print(f"🔥 [Epoch {epoch+1}] Hard Distillation Mode: Rebuilding DataLoader to flush persistent workers...")
                     train_loader = apply_hard_distillation_mode(cfg, train_loader, val_loader)
                     hard_distillation_applied = True
-                
-                if cfg.use_sigma_jitter:
-                    # Fallback for dynamic safety
-                    cfg.use_sigma_jitter = False
 
             # --- 1. 训练 ---
             model.train()
@@ -629,7 +632,7 @@ def train(args):
                     log_probs = F.log_softmax(logits, dim=1)
                     
                     # 计算 Combined Loss
-                    loss, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate = criterion(
+                    loss, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate, pred_age = criterion(
                         log_probs, target_dists, true_ages, logits, embeddings=embeddings, extras=extras
                     )
                 
@@ -650,9 +653,9 @@ def train(args):
                 if ema and not step_skipped:
                     ema.update()
                     
-                loss_value = loss.item()
+                loss_value = loss.detach()
                 current_batch_size = true_ages.size(0)
-                train_loss += loss_value * current_batch_size
+                train_loss += loss_value.item() * current_batch_size
                 train_batches += 1
                 _accumulate_loss_components(
                     train_loss_sums,
@@ -667,33 +670,31 @@ def train(args):
                     loss_moe_gate,
                 )
                 
-                # 计算 MAE (Monitor)
+                # 计算 MAE (Monitor) — reuse pred_age from CombinedLoss
                 with torch.no_grad():
-                    probs = F.softmax(logits, dim=1)
-                    pred_ages = dldl_tools.expectation_regression(probs)
-                    train_mae_sum += torch.sum(torch.abs(pred_ages - true_ages)).item()
+                    train_mae_sum += torch.sum(torch.abs(pred_age - true_ages)).item()
                     train_samples += current_batch_size
                 
                 if (batch_idx + 1) % 100 == 0:
                     print(
-                        f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss_value:.4f} "
-                        f"(KL={loss_kl:.3f}, L1={loss_l1:.3f}, Rank={loss_rank:.3f}, "
-                        f"MV={loss_mv:.3f}, Triplet={loss_triplet:.3f}, Asym={loss_asym:.3f}, MoE={loss_moe_gate:.3f})"
+                        f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {_to_float(loss_value):.4f} "
+                        f"(KL={_to_float(loss_kl):.3f}, L1={_to_float(loss_l1):.3f}, Rank={_to_float(loss_rank):.3f}, "
+                        f"MV={_to_float(loss_mv):.3f}, Triplet={_to_float(loss_triplet):.3f}, Asym={_to_float(loss_asym):.3f}, MoE={_to_float(loss_moe_gate):.3f})"
                     )
-                
+
                 if batch_idx % 10 == 0:
-                    batch_logger.log([epoch + 1, batch_idx, loss_value, loss_kl, loss_l1, loss_rank, loss_mv, loss_triplet, loss_asym, loss_moe_gate])
-                    
+                    batch_logger.log([epoch + 1, batch_idx, _to_float(loss_value), _to_float(loss_kl), _to_float(loss_l1), _to_float(loss_rank), _to_float(loss_mv), _to_float(loss_triplet), _to_float(loss_asym), _to_float(loss_moe_gate)])
+
                     # 📈 TensorBoard Logging (Step)
                     global_step = epoch * len(train_loader) + batch_idx
-                    writer.add_scalar('Train/Loss_Total', loss_value, global_step)
-                    writer.add_scalar('Train/Loss_KL', loss_kl, global_step)
-                    writer.add_scalar('Train/Loss_L1', loss_l1, global_step)
-                    writer.add_scalar('Train/Loss_Rank', loss_rank, global_step)
-                    writer.add_scalar('Train/Loss_MV', loss_mv, global_step)
-                    writer.add_scalar('Train/Loss_Triplet', loss_triplet, global_step)
-                    writer.add_scalar('Train/Loss_Asym', loss_asym, global_step)
-                    writer.add_scalar('Train/Loss_MoE_Gate', loss_moe_gate, global_step)
+                    writer.add_scalar('Train/Loss_Total', _to_float(loss_value), global_step)
+                    writer.add_scalar('Train/Loss_KL', _to_float(loss_kl), global_step)
+                    writer.add_scalar('Train/Loss_L1', _to_float(loss_l1), global_step)
+                    writer.add_scalar('Train/Loss_Rank', _to_float(loss_rank), global_step)
+                    writer.add_scalar('Train/Loss_MV', _to_float(loss_mv), global_step)
+                    writer.add_scalar('Train/Loss_Triplet', _to_float(loss_triplet), global_step)
+                    writer.add_scalar('Train/Loss_Asym', _to_float(loss_asym), global_step)
+                    writer.add_scalar('Train/Loss_MoE_Gate', _to_float(loss_moe_gate), global_step)
                     writer.add_scalar('Train/LR', optimizer.param_groups[0]['lr'], global_step)
 
                 if max_train_batches is not None and train_batches >= max_train_batches:
