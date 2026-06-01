@@ -49,12 +49,28 @@ def _read_ready_rows(audit_paths):
                     seed = int(row.get("seed", ""))
                 except ValueError:
                     continue
-                ready[(_row_key(row), seed)] = row
+                key = (_row_key(row), seed)
+                if key in ready:
+                    raise ValueError(f"duplicate paper-ready audit row for {key[0]} seed {seed}")
+                ready[key] = row
     return ready
+
+
+def _parse_metric(row, field, candidate, seed):
+    value = row.get(field, "")
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid {field} for {candidate} seed {seed}: {value!r}") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"non-finite {field} for {candidate} seed {seed}: {value!r}")
+    return parsed
 
 
 def build_summary(audit_paths, candidates, seeds):
     ready_rows = _read_ready_rows(audit_paths)
+    # All distinct paper-ready row keys (without the seed), for mismatch diagnostics.
+    available_keys = {key for key, _seed in ready_rows}
     summary = []
     for candidate in candidates:
         ablation_id = ""
@@ -69,19 +85,38 @@ def build_summary(audit_paths, candidates, seeds):
             if row is None:
                 missing_seeds.append(seed)
                 continue
-            ready_seeds.append(seed)
+            row_metrics_for_seed = {}
             for field in METRIC_FIELDS:
                 try:
-                    row_metrics[field].append(float(row.get(field, "")))
-                except ValueError:
-                    pass
+                    row_metrics_for_seed[field] = _parse_metric(row, field, candidate, seed)
+                except ValueError as exc:
+                    missing_seeds.append(seed)
+                    print(f"⚠️ {exc}")
+                    break
+            else:
+                ready_seeds.append(seed)
+                for field, value in row_metrics_for_seed.items():
+                    row_metrics[field].append(value)
 
-        if len(ready_seeds) == len(seeds):
+        if len(ready_seeds) == len(seeds) and all(len(row_metrics[field]) == len(seeds) for field in METRIC_FIELDS):
             status = "complete"
         elif ready_seeds:
             status = "partial"
         else:
             status = "missing"
+
+        # Surface likely candidate-key mismatches: nothing matched, yet the audit
+        # file does contain paper-ready rows whose key references this backbone.
+        # Without this, a typo/format mismatch silently drops numbers from the table.
+        if status == "missing":
+            backbone = candidate_name.split("/")[-1]
+            related = sorted(k for k in available_keys if k.split("/")[-1].split(":")[-1] == backbone)
+            if related:
+                print(
+                    f"⚠️ Candidate {candidate!r} matched no audit rows, but paper-ready "
+                    f"rows exist for the same backbone under keys {related}. "
+                    "Check the --candidates key format (expected 'source/name' or 'ablation:source/name')."
+                )
 
         selected_values = row_metrics["selected_test_mae"]
         summary.append({

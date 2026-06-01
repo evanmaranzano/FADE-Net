@@ -166,8 +166,56 @@ class Config:
     # Lower this if you hit OOM on small VRAM GPUs (e.g. 8GB).
     tta_batch_size = None
 
+    _DERIVED_ATTRS = frozenset({
+        "effective_msff_feature_indices", "effective_msff_channels",
+        "effective_msff_spatial", "effective_deep_channels",
+        "hybrid_attention_replaced_blocks", "split_metadata",
+        "effective_pretrained", "regularization_schedule",
+    })
+    _allow_derived_set = False
+
     def __init__(self):
         pass # Attributes are class-level or properties
-        
+
+    def __setattr__(self, name, value):
+        if name in type(self)._DERIVED_ATTRS and not type(self)._allow_derived_set:
+            import warnings
+            warnings.warn(
+                f"Config: directly mutating derived attr '{name}'. "
+                f"Use populate_*() or set Config._allow_derived_set = True.",
+                stacklevel=2, category=UserWarning,
+            )
+        super().__setattr__(name, value)
+
+    def validate(self):
+        """Validate config invariants. Call after all overrides are applied."""
+        errors = []
+        if self.min_age > self.max_age:
+            errors.append(f"min_age({self.min_age}) > max_age({self.max_age})")
+        if self.num_classes != self.max_age - self.min_age + 1:
+            errors.append(f"num_classes({self.num_classes}) != max_age({self.max_age}) - min_age({self.min_age}) + 1")
+        if self.sigma_min > self.sigma_max:
+            errors.append(f"sigma_min({self.sigma_min}) > sigma_max({self.sigma_max})")
+        if self.learning_rate <= 0:
+            errors.append(f"learning_rate must be positive, got {self.learning_rate}")
+        if self.batch_size <= 0:
+            errors.append(f"batch_size must be positive, got {self.batch_size}")
+        if self.epochs <= 0:
+            errors.append(f"epochs must be positive, got {self.epochs}")
+        if self.freeze_backbone_epochs < 0:
+            errors.append(f"freeze_backbone_epochs must be non-negative, got {self.freeze_backbone_epochs}")
+        if self.num_workers < 0:
+            errors.append(f"num_workers must be non-negative, got {self.num_workers}")
+        if not (0 <= self.dropout < 1):
+            errors.append(f"dropout must be in [0,1), got {self.dropout}")
+        if not (0 <= self.mixup_prob <= 1):
+            errors.append(f"mixup_prob must be in [0,1], got {self.mixup_prob}")
+        if self.mixup_alpha < 0:
+            errors.append(f"mixup_alpha must be non-negative, got {self.mixup_alpha}")
+        if not (0 <= self.re_prob <= 1):
+            errors.append(f"re_prob must be in [0,1], got {self.re_prob}")
+        if errors:
+            raise ValueError("Config validation failed:\n  " + "\n  ".join(errors))
+
     def __repr__(self):
         return f"🚀 Starting Project: {self.project_name} on {self.device}"

@@ -3,6 +3,7 @@ import sys
 import tempfile
 import unittest
 import json
+from unittest import mock
 from pathlib import Path
 
 import torch
@@ -31,7 +32,7 @@ from experiment import (
     inference_checkpoint_metadata_mismatches,
     is_compatible_checkpoint,
 )
-from advanced_eval import evaluate_uncertainty
+from advanced_eval import evaluate_ensemble, evaluate_uncertainty
 from swa_average import average_checkpoints, discover_checkpoint_seeds
 from train import _guard_fresh_artifact_overwrite, amp_step_was_skipped, make_grad_scaler, parse_selected_test_mae
 from train import hard_distillation_schedule_metadata
@@ -70,6 +71,11 @@ class FlipSensitiveLogitModel(torch.nn.Module):
         return torch.stack([left, torch.zeros_like(left), right], dim=1)
 
 
+class FailingLogitModel(torch.nn.Module):
+    def forward(self, images):
+        raise RuntimeError("forced forward failure")
+
+
 class ExperimentIntegrityTests(unittest.TestCase):
     def make_config(self):
         cfg = Config()
@@ -94,7 +100,9 @@ class ExperimentIntegrityTests(unittest.TestCase):
         })
 
         self.assertEqual(["raw", "flip", "multi"], meta_a["reported_tta_modes"])
-        self.assertEqual("multi", meta_a["selection_metric"]["tta"])
+        self.assertEqual("flip", meta_a["selection_metric"]["tta"])
+        self.assertEqual("flip", meta_a["validation_tta"])
+        self.assertEqual("multi", meta_a["test_tta"])
 
         mismatches = checkpoint_metadata_mismatches({"metadata": meta_a}, meta_b)
         mismatch_keys = {key for key, _, _ in mismatches}
@@ -586,6 +594,25 @@ class ExperimentIntegrityTests(unittest.TestCase):
         self.assertEqual(3, len(model.calls))
         self.assertEqual([2, 2, 2], [call.size(0) for call in model.calls])
 
+    def test_tta_chunking_does_not_materialize_all_augmented_inputs(self):
+        cfg = self.make_config()
+        images = torch.arange(3 * cfg.img_size * cfg.img_size, dtype=torch.float32).reshape(
+            1, 3, cfg.img_size, cfg.img_size
+        )
+        original_cat = torch.cat
+
+        def limited_cat(tensors, dim=0, *args, **kwargs):
+            tensors = tuple(tensors)
+            if dim == 0 and tensors and tensors[0].dim() == 4:
+                self.assertLessEqual(sum(t.size(0) for t in tensors), 2)
+            return original_cat(tensors, dim=dim, *args, **kwargs)
+
+        model = RecordingLogitModel(cfg.num_classes)
+        with mock.patch.object(torch, "cat", side_effect=limited_cat):
+            predict_probs(model, images, mode="multi", base_size=cfg.img_size, max_augmented_batch_size=2)
+
+        self.assertEqual([2, 2, 2], [call.size(0) for call in model.calls])
+
     def test_tta_chunked_and_batched_outputs_match(self):
         cfg = self.make_config()
         images = torch.arange(2 * 3 * cfg.img_size * cfg.img_size, dtype=torch.float32).reshape(
@@ -656,6 +683,39 @@ class ExperimentIntegrityTests(unittest.TestCase):
         self.assertGreaterEqual(summary["mae"], 0.0)
         self.assertGreater(summary["mean_age_std"], 0.0)
 
+    def test_advanced_eval_uncertainty_restores_training_state_on_failure(self):
+        cfg = self.make_config()
+        model = FailingLogitModel()
+        model.train()
+        valid_batch = (
+            torch.zeros(1, 3, cfg.img_size, cfg.img_size),
+            torch.zeros(1, cfg.num_classes),
+            torch.ones(1),
+        )
+
+        with self.assertRaises(RuntimeError):
+            evaluate_uncertainty(model, [valid_batch], cfg, cfg.device, mode="raw")
+
+        self.assertTrue(model.training)
+
+    def test_advanced_eval_ensemble_restores_original_states_on_failure(self):
+        cfg = self.make_config()
+        train_model = ConstantLogitModel(cfg.num_classes)
+        eval_model = FailingLogitModel()
+        train_model.train()
+        eval_model.eval()
+        valid_batch = (
+            torch.zeros(1, 3, cfg.img_size, cfg.img_size),
+            torch.zeros(1, cfg.num_classes),
+            torch.ones(1),
+        )
+
+        with self.assertRaises(RuntimeError):
+            evaluate_ensemble([train_model, eval_model], [valid_batch], cfg, cfg.device, modes=("raw",))
+
+        self.assertTrue(train_model.training)
+        self.assertFalse(eval_model.training)
+
     def test_evaluate_mae_rejects_all_empty_batches(self):
         cfg = self.make_config()
         model = ConstantLogitModel(cfg.num_classes)
@@ -698,6 +758,7 @@ class ExperimentIntegrityTests(unittest.TestCase):
 
     def test_swa_returns_checkpoint_metadata(self):
         cfg = self.make_config()
+        cfg.use_ema = False
         meta = build_training_metadata(cfg, seed=42, split_metadata={"fingerprint": "aaa"})
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -710,6 +771,63 @@ class ExperimentIntegrityTests(unittest.TestCase):
 
         self.assertEqual(meta, returned_meta)
         self.assertTrue(torch.equal(torch.full((1,), 2.0), avg_state["w"]))
+
+    def test_swa_prefers_ema_weights_and_preserves_model_buffers(self):
+        cfg = self.make_config()
+        cfg.use_ema = True
+        meta = build_training_metadata(cfg, seed=42, split_metadata={"fingerprint": "aaa"})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path_a = os.path.join(tmpdir, "a.pth")
+            path_b = os.path.join(tmpdir, "b.pth")
+            torch.save({
+                "model_state_dict": {
+                    "weight": torch.tensor([1.0], dtype=torch.float32),
+                    "running_mean": torch.tensor([10.0], dtype=torch.float16),
+                    "num_batches_tracked": torch.tensor(4, dtype=torch.long),
+                },
+                "ema_state_dict": {"weight": torch.tensor([3.0], dtype=torch.float32)},
+                "metadata": meta,
+            }, path_a)
+            torch.save({
+                "model_state_dict": {
+                    "weight": torch.tensor([5.0], dtype=torch.float32),
+                    "running_mean": torch.tensor([14.0], dtype=torch.float16),
+                    "num_batches_tracked": torch.tensor(4, dtype=torch.long),
+                },
+                "ema_state_dict": {"weight": torch.tensor([7.0], dtype=torch.float32)},
+                "metadata": meta,
+            }, path_b)
+
+            avg_state, _ = average_checkpoints([path_a, path_b], device="cpu")
+
+        self.assertTrue(torch.equal(torch.tensor([5.0]), avg_state["weight"]))
+        self.assertEqual(torch.float16, avg_state["running_mean"].dtype)
+        self.assertTrue(torch.equal(torch.tensor([12.0], dtype=torch.float16), avg_state["running_mean"]))
+        self.assertEqual(torch.long, avg_state["num_batches_tracked"].dtype)
+        self.assertTrue(torch.equal(torch.tensor(4, dtype=torch.long), avg_state["num_batches_tracked"]))
+
+    def test_swa_rejects_ema_shape_mismatch(self):
+        cfg = self.make_config()
+        cfg.use_ema = True
+        meta = build_training_metadata(cfg, seed=42, split_metadata={"fingerprint": "aaa"})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path_a = os.path.join(tmpdir, "a.pth")
+            path_b = os.path.join(tmpdir, "b.pth")
+            torch.save({
+                "model_state_dict": {"weight": torch.ones(1)},
+                "ema_state_dict": {"weight": torch.ones(1)},
+                "metadata": meta,
+            }, path_a)
+            torch.save({
+                "model_state_dict": {"weight": torch.ones(2)},
+                "ema_state_dict": {"weight": torch.ones(2)},
+                "metadata": meta,
+            }, path_b)
+
+            with self.assertRaisesRegex(RuntimeError, "shape mismatch"):
+                average_checkpoints([path_a, path_b], device="cpu")
 
     def test_swa_auto_detection_includes_formal_seed_2026(self):
         cfg = self.make_config()
@@ -783,6 +901,56 @@ class ExperimentIntegrityTests(unittest.TestCase):
         self.assertTrue(amp_step_was_skipped(1024.0, 512.0))
         self.assertFalse(amp_step_was_skipped(1024.0, 1024.0))
         self.assertFalse(amp_step_was_skipped(1024.0, 2048.0))
+
+    def test_msff_metadata_default_indices_match_model_fallback(self):
+        class MinimalConfig:
+            project_name = "FADE-Net"
+            split_protocol = "72-8-20"
+            backbone_source = "torchvision"
+            backbone_name = "mobilenet_v3_large"
+            backbone_pretrained = False
+            effective_pretrained = False
+            use_multi_scale = True
+            use_hybrid_attention = False
+            use_dldl_v2 = True
+            use_spp = False
+            use_mv_loss = False
+            use_texture_branch = False
+            use_freq_attention = False
+            use_moe = False
+            use_adaptive_triplet = False
+            use_asymmetric_ordinal = False
+            epochs = 120
+            img_size = 224
+            num_classes = 81
+            min_age = 0
+            max_age = 80
+
+        metadata = build_training_metadata(MinimalConfig(), seed=42)
+
+        self.assertEqual([6, 12], metadata["backbone"]["msff_feature_indices"])
+
+    def test_validation_and_test_tta_are_metadata_checked(self):
+        cfg = self.make_config()
+        expected = build_training_metadata(cfg, seed=42)
+        checkpoint_meta = dict(expected)
+        checkpoint_meta["test_tta"] = "flip"
+
+        mismatches = checkpoint_metadata_mismatches({"metadata": checkpoint_meta}, expected)
+
+        self.assertIn("test_tta", {key for key, _, _ in mismatches})
+
+    def test_derived_attr_guard_restores_prior_value(self):
+        from experiment import set_derived_attrs
+
+        cfg = self.make_config()
+        old = type(cfg)._allow_derived_set
+        type(cfg)._allow_derived_set = True
+        try:
+            set_derived_attrs(cfg, {"split_metadata": {"fingerprint": "aaa"}})
+            self.assertTrue(type(cfg)._allow_derived_set)
+        finally:
+            type(cfg)._allow_derived_set = old
 
 
 if __name__ == "__main__":

@@ -71,13 +71,18 @@ class PaperResultAuditTests(unittest.TestCase):
         split_path = Path(root_dir) / split_file
         split_path.write_text(json.dumps(split_payload), encoding="utf-8")
         split_fingerprint = file_sha256(split_path)
-        cfg.split_metadata = {
-            "split_file": split_file,
-            "split_file_tag": split_file_tag,
-            "fingerprint": split_fingerprint,
-            "dataset_fingerprint": "dataset-hash",
-            "legacy_upgraded": split_legacy,
-        }
+        _cfg_cls = type(cfg)
+        _cfg_cls._allow_derived_set = True
+        try:
+            cfg.split_metadata = {
+                "split_file": split_file,
+                "split_file_tag": split_file_tag,
+                "fingerprint": split_fingerprint,
+                "dataset_fingerprint": "dataset-hash",
+                "legacy_upgraded": split_legacy,
+            }
+        finally:
+            _cfg_cls._allow_derived_set = False
         populate_runtime_model_metadata(cfg)
         metadata = build_training_metadata(cfg, seed)
 
@@ -224,6 +229,74 @@ class PaperResultAuditTests(unittest.TestCase):
 
         self.assertEqual("blocked", row["status"])
         self.assertIn("split file has no _metadata", row["reasons"])
+
+    def test_audit_blocks_non_finite_metrics(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = self.make_config()
+            self.write_paper_ready_artifacts(tmpdir, cfg, split_file_tag="formal_v1")
+            result_path = Path(artifact_path(str(tmpdir), "final_result", cfg, 42, ".txt"))
+            text = result_path.read_text(encoding="utf-8").replace("MAE_raw: 3.40", "MAE_raw: nan")
+            result_path.write_text(text, encoding="utf-8")
+
+            row = audit_candidate(Path(tmpdir), cfg, seed=42)
+
+        self.assertEqual("blocked", row["status"])
+        self.assertIn("non-finite numeric metric mae_raw", row["reasons"])
+
+    def test_audit_blocks_selected_metric_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = self.make_config()
+            self.write_paper_ready_artifacts(tmpdir, cfg, split_file_tag="formal_v1")
+            result_path = Path(artifact_path(str(tmpdir), "final_result", cfg, 42, ".txt"))
+            text = result_path.read_text(encoding="utf-8").replace("Selected_Test_MAE: 3.30", "Selected_Test_MAE: 9.99")
+            result_path.write_text(text, encoding="utf-8")
+
+            row = audit_candidate(Path(tmpdir), cfg, seed=42)
+
+        self.assertEqual("blocked", row["status"])
+        self.assertIn("selected_test_mae mismatch", row["reasons"])
+
+    def test_audit_blocks_overlapping_split_indices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = self.make_config()
+            self.write_paper_ready_artifacts(tmpdir, cfg, split_file_tag="formal_v1")
+            split_path = Path(tmpdir) / "dataset_split_AFAD_72_8_20_formal_v1.json"
+            payload = json.loads(split_path.read_text(encoding="utf-8"))
+            payload["test"] = [1]
+            split_path.write_text(json.dumps(payload), encoding="utf-8")
+            fingerprint = file_sha256(split_path)
+            for kind in ("best_model", "last_checkpoint"):
+                checkpoint_path = Path(artifact_path(str(tmpdir), kind, cfg, 42, ".pth"))
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+                checkpoint["metadata"] = dict(checkpoint["metadata"])
+                checkpoint["metadata"]["split_fingerprint"] = fingerprint
+                torch.save(checkpoint, checkpoint_path)
+
+            row = audit_candidate(Path(tmpdir), cfg, seed=42)
+
+        self.assertEqual("blocked", row["status"])
+        self.assertIn("split overlap", row["reasons"])
+
+    def test_audit_blocks_non_integer_split_indices(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = self.make_config()
+            self.write_paper_ready_artifacts(tmpdir, cfg, split_file_tag="formal_v1")
+            split_path = Path(tmpdir) / "dataset_split_AFAD_72_8_20_formal_v1.json"
+            payload = json.loads(split_path.read_text(encoding="utf-8"))
+            payload["val"] = ["1"]
+            split_path.write_text(json.dumps(payload), encoding="utf-8")
+            fingerprint = file_sha256(split_path)
+            for kind in ("best_model", "last_checkpoint"):
+                checkpoint_path = Path(artifact_path(str(tmpdir), kind, cfg, 42, ".pth"))
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+                checkpoint["metadata"] = dict(checkpoint["metadata"])
+                checkpoint["metadata"]["split_fingerprint"] = fingerprint
+                torch.save(checkpoint, checkpoint_path)
+
+            row = audit_candidate(Path(tmpdir), cfg, seed=42)
+
+        self.assertEqual("blocked", row["status"])
+        self.assertIn("non-integer", row["reasons"])
 
     def test_write_audit_preserves_status_and_reasons(self):
         with tempfile.TemporaryDirectory() as tmpdir:

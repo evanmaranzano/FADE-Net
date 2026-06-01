@@ -5,12 +5,65 @@ from typing import Any
 import torch
 
 
+def set_derived_attr(config, name: str, value: Any) -> None:
+    """Set a derived Config attribute while restoring the prior class-level guard."""
+    cfg_cls = type(config)
+    old = getattr(cfg_cls, "_allow_derived_set", False)
+    cfg_cls._allow_derived_set = True
+    try:
+        setattr(config, name, value)
+    finally:
+        cfg_cls._allow_derived_set = old
+
+
+def set_derived_attrs(config, values: dict[str, Any]) -> None:
+    """Set multiple derived Config attributes while restoring the prior guard."""
+    cfg_cls = type(config)
+    old = getattr(cfg_cls, "_allow_derived_set", False)
+    cfg_cls._allow_derived_set = True
+    try:
+        for name, value in values.items():
+            setattr(config, name, value)
+    finally:
+        cfg_cls._allow_derived_set = old
+
+
+def populate_feature_spec_metadata(config) -> None:
+    """Fill MSFF-related config fields by probing the backbone, without building the full model."""
+    try:
+        from .backbones import build_backbone
+    except ImportError:
+        from backbones import build_backbone
+
+    original_pretrained = getattr(config, "backbone_pretrained", True)
+    config.backbone_pretrained = False
+    try:
+        backbone = build_backbone(config)
+        configured_indices = tuple(getattr(config, "msff_feature_indices", (6, 12)))
+        spec = backbone.infer_feature_spec(config.img_size, configured_indices)
+        set_derived_attrs(config, {
+            "effective_msff_feature_indices": (spec.shallow_index, spec.mid_index),
+            "effective_msff_channels": (spec.shallow_channels, spec.mid_channels),
+            "effective_msff_spatial": (spec.shallow_spatial, spec.mid_spatial),
+            "effective_deep_channels": spec.out_channels,
+            "hybrid_attention_replaced_blocks": (),
+        })
+        del backbone
+    finally:
+        config.backbone_pretrained = original_pretrained
+
+
 def populate_runtime_model_metadata(config) -> None:
-    """Fill model-derived metadata fields without downloading pretrained weights."""
+    """Fill model-derived metadata fields without downloading pretrained weights.
+    Delegates to populate_feature_spec_metadata for MSFF fields, then builds
+    the full model to populate remaining derived fields (e.g. hybrid_attention)."""
     from contextlib import redirect_stdout
     import io
 
-    from model import LightweightAgeEstimator
+    try:
+        from .model import LightweightAgeEstimator
+    except ImportError:
+        from model import LightweightAgeEstimator
 
     original_pretrained = getattr(config, "backbone_pretrained", True)
     config.backbone_pretrained = False
@@ -24,7 +77,10 @@ def populate_runtime_model_metadata(config) -> None:
 
 def build_model_for_checkpoint_load(config):
     """Build checkpoint target architecture without fetching pretrained weights."""
-    from model import LightweightAgeEstimator
+    try:
+        from .model import LightweightAgeEstimator
+    except ImportError:
+        from model import LightweightAgeEstimator
 
     original_pretrained = getattr(config, "backbone_pretrained", True)
     config.backbone_pretrained = False
@@ -86,9 +142,9 @@ def backbone_signature(config) -> dict[str, Any]:
         "name": getattr(config, "backbone_name", "mobilenet_v3_large"),
         "pretrained": bool(getattr(config, "backbone_pretrained", True)),
         "effective_pretrained": bool(getattr(config, "effective_pretrained", getattr(config, "backbone_pretrained", True))),
-        "msff_feature_indices": _list_value(getattr(config, "msff_feature_indices", (1, 3))),
+        "msff_feature_indices": _list_value(getattr(config, "msff_feature_indices", (6, 12))),
         "effective_msff_feature_indices": _list_value(
-            getattr(config, "effective_msff_feature_indices", getattr(config, "msff_feature_indices", (1, 3)))
+            getattr(config, "effective_msff_feature_indices", getattr(config, "msff_feature_indices", (6, 12)))
         ),
         "effective_msff_channels": _list_value(getattr(config, "effective_msff_channels", [])),
         "effective_msff_spatial": _list_value(getattr(config, "effective_msff_spatial", [])),
@@ -118,27 +174,19 @@ def ablation_signature(config) -> dict[str, bool]:
     }
 
 
+_LOSS_FIELDS = (
+    "lambda_l1", "lambda_rank", "lambda_mv", "lambda_triplet",
+    "triplet_base_margin", "triplet_alpha", "triplet_max_margin", "triplet_age_threshold",
+    "lambda_asym", "asym_under_weight", "asym_over_weight", "asym_delta",
+    "moe_num_experts", "moe_hidden_dim", "lambda_moe_gate", "lambda_moe_balance",
+    "use_reweighting", "lds_sigma",
+)
+
+
 def loss_signature(config) -> dict[str, Any]:
-    return {
-        "lambda_l1": getattr(config, "lambda_l1", None),
-        "lambda_rank": getattr(config, "lambda_rank", None),
-        "lambda_mv": getattr(config, "lambda_mv", None),
-        "lambda_triplet": getattr(config, "lambda_triplet", None),
-        "triplet_base_margin": getattr(config, "triplet_base_margin", None),
-        "triplet_alpha": getattr(config, "triplet_alpha", None),
-        "triplet_max_margin": getattr(config, "triplet_max_margin", None),
-        "triplet_age_threshold": getattr(config, "triplet_age_threshold", None),
-        "lambda_asym": getattr(config, "lambda_asym", None),
-        "asym_under_weight": getattr(config, "asym_under_weight", None),
-        "asym_over_weight": getattr(config, "asym_over_weight", None),
-        "asym_delta": getattr(config, "asym_delta", None),
-        "moe_num_experts": getattr(config, "moe_num_experts", None),
-        "moe_hidden_dim": getattr(config, "moe_hidden_dim", None),
-        "lambda_moe_gate": getattr(config, "lambda_moe_gate", None),
-        "lambda_moe_balance": getattr(config, "lambda_moe_balance", None),
-        "use_reweighting": bool(getattr(config, "use_reweighting", False)),
-        "lds_sigma": getattr(config, "lds_sigma", None),
-    }
+    signature = {field: getattr(config, field, None) for field in _LOSS_FIELDS}
+    signature["use_reweighting"] = bool(getattr(config, "use_reweighting", False))
+    return signature
 
 
 def augmentation_signature(config) -> dict[str, Any]:
@@ -220,9 +268,9 @@ def build_training_metadata(config, seed: int, split_metadata: dict[str, Any] | 
         "selection_metric": {
             "split": "val",
             "metric": "MAE",
-            "tta": "multi",
+            "tta": "flip",
         },
-        "validation_tta": "multi",
+        "validation_tta": "flip",
         "test_tta": "multi",
     }
 
@@ -325,6 +373,8 @@ METADATA_KEYS = (
     "regularization_schedule",
     "reported_tta_modes",
     "selection_metric",
+    "validation_tta",
+    "test_tta",
 )
 
 INFERENCE_IGNORED_METADATA_KEYS = (
@@ -398,6 +448,11 @@ def load_model_state_package(path: str, device):
     checkpoint = safe_torch_load(path, device)
     if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         return checkpoint["model_state_dict"], checkpoint
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError(
+            f"Checkpoint at {path} is not a dict (got {type(checkpoint).__name__}). "
+            "Expected a packaged training checkpoint with 'model_state_dict' key."
+        )
     return checkpoint, {"metadata": {}}
 
 

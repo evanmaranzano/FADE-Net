@@ -2,7 +2,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from collections import namedtuple
 # import mediapipe as mp
+
+LossOutput = namedtuple("LossOutput", [
+    "total", "kl", "l1", "rank", "mv", "triplet", "asym", "moe_gate", "pred_age"
+])
 import random
 import os
 from contextlib import nullcontext
@@ -134,6 +139,27 @@ class DLDLProcessor:
         batch_expected_age = torch.sum(predicted_probs * age_indices, dim=1)
         return batch_expected_age
 
+
+# Module-level DLDL cache to avoid redundant instantiation
+_dldl_cache = {}
+
+
+def get_dldl_processor(config):
+    """Return a shared DLDLProcessor instance for the given config (deduplicates instantiation)."""
+    key = (
+        config.num_classes,
+        config.max_age,
+        getattr(config, 'use_dldl_v2', True),
+        getattr(config, 'use_adaptive_sigma', False),
+        getattr(config, 'sigma_min', None),
+        getattr(config, 'sigma_max', None),
+        getattr(config, 'sigma', None),
+        getattr(config, 'label_smoothing', 0.0),
+    )
+    if key not in _dldl_cache:
+        _dldl_cache[key] = DLDLProcessor(config)
+    return _dldl_cache[key]
+
 # ==========================================
 # 3. EMA
 # ==========================================
@@ -148,6 +174,12 @@ class EMAModel:
     def register(self):
         for name, param in self.model.named_parameters():
             if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    def register_new_params(self):
+        """Register parameters that became trainable after initial registration (e.g. after backbone unfreeze)."""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and name not in self.shadow:
                 self.shadow[name] = param.data.clone()
 
     def update(self):
@@ -247,18 +279,11 @@ class OrderRegressionLoss(nn.Module):
         return loss_emd
 
 def utils_cdf(age, num_classes, device):
-    # helper: create heaviside CDF
+    # Heaviside step CDF: F(k) = 1 if k >= age, else 0
     # age [B], output [B, K]
+    # For age=3: [0, 0, 0, 1, 1, 1, ...]
+    # Fallback only — training always provides target_dists.
     indices = torch.arange(num_classes, device=device).unsqueeze(0)
-    # CDF: 1 if idx < age, else 0? No.
-    # CDF(k) = P(X <= k)
-    # if true_age = 3.5. 
-    # k=0 (<=3.5? Yes), k=1(Yes)... k=3(Yes), k=4(No)
-    # So 1 if k < true_age ? 
-    # Typically CDF is 1 for k >= true_age.
-    # Let takes floor.
-    # target CDF: 0 0 0 1 1 1 ... (step at age)
-    # Actually: 0 0 0 ... until age, then 1.
     return (indices >= age.unsqueeze(1)).float()
 
 # ==========================================
@@ -381,7 +406,7 @@ class CombinedLoss(nn.Module):
         self.lambda_l1 = getattr(config, 'lambda_l1', 0.1)
         self.lambda_rank = getattr(config, 'lambda_rank', 0.5) # 获取 rank weight
         
-        self.dldl = DLDLProcessor(config)
+        self.dldl = get_dldl_processor(config)
         self.weights = weights 
         
         # 使用 CDF loss 作为 "Rank/Structure" Loss
@@ -514,8 +539,8 @@ class CombinedLoss(nn.Module):
             gate_probs = torch.exp(gate_log_probs)
             loss_moe_gate = F.kl_div(gate_log_probs, gate_targets, reduction='batchmean')
             loss_moe_balance = self._moe_batch_balance_loss(gate_probs, target_dists, log_probs.device)
-            logged_moe_gate = loss_moe_gate.detach()
             term_moe_gate = self.lambda_moe_gate * loss_moe_gate + self.lambda_moe_balance * loss_moe_balance
+            logged_moe_gate = term_moe_gate.detach()
         else:
             logged_moe_gate = loss_moe_gate.detach()
             term_moe_gate = 0.0
@@ -524,16 +549,15 @@ class CombinedLoss(nn.Module):
         l1_term = 0.0 if self.use_asymmetric_ordinal else self.lambda_l1 * l1
         total_loss = w_kl + l1_term + term_rank + term_mv + term_triplet + term_asym + term_moe_gate
         logged_l1 = l1_term if isinstance(l1_term, torch.Tensor) else torch.tensor(l1_term, device=log_probs.device)
-        # Return tuple: (total, kl, l1, rank, mv, triplet, asym, moe_gate, pred_age)
-        # total_loss retains grad_fn; others are detached tensors for logging
-        return (
-            total_loss,
-            w_kl.detach(),
-            logged_l1.detach(),
-            rank_loss.detach(),
-            loss_mv.detach(),
-            loss_triplet.detach(),
-            loss_asym.detach(),
-            logged_moe_gate.detach(),
-            pred_age.detach(),
+        # Return LossOutput (namedtuple, backward-compatible with tuple unpacking)
+        return LossOutput(
+            total=total_loss,
+            kl=w_kl.detach(),
+            l1=logged_l1.detach(),
+            rank=rank_loss.detach(),
+            mv=loss_mv.detach(),
+            triplet=loss_triplet.detach(),
+            asym=loss_asym.detach(),
+            moe_gate=logged_moe_gate.detach(),
+            pred_age=pred_age.detach(),
         )

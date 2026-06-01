@@ -8,7 +8,16 @@ import glob
 
 # ================= 配置区域 =================
 SAVE_DIR = 'plots'
-plt.style.use('seaborn-v0_8-paper')
+# Style name varies across matplotlib versions; fall back to default if unavailable.
+try:
+    plt.style.use('seaborn-v0_8-paper')
+except (OSError, ValueError):
+    print("⚠️ matplotlib style 'seaborn-v0_8-paper' unavailable; using default style.")
+
+# Columns the plotting suite hard-depends on. A legacy/partial log missing any of
+# these would otherwise raise an opaque KeyError mid-render.
+REQUIRED_EPOCH_COLUMNS = ('Epoch', 'Val_MAE', 'Train_Loss', 'LR', 'Time')
+REQUIRED_BATCH_COLUMNS = ('Epoch', 'Total_Loss')
 
 # 统一的论文级字体配置
 plt.rcParams.update({
@@ -117,7 +126,27 @@ def train_mae_column(df_epoch):
 
 def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
     df_epoch, df_batch, detected_seed, detected_experiment_id = load_real_data(seed, log_path=log_path)
-    if df_epoch is None: return
+    if df_epoch is None: return False
+
+    missing_cols = [c for c in REQUIRED_EPOCH_COLUMNS if c not in df_epoch.columns]
+    train_mae_col, train_mae_label = train_mae_column(df_epoch)
+    if train_mae_col not in df_epoch.columns:
+        missing_cols.append(train_mae_col)
+    if missing_cols:
+        print(f"❌ Epoch log is missing required columns {missing_cols}; cannot plot this log.")
+        print(f"   Available columns: {list(df_epoch.columns)}")
+        return False
+    missing_batch_cols = [c for c in REQUIRED_BATCH_COLUMNS if c not in df_batch.columns]
+    if missing_batch_cols:
+        print(f"❌ Batch log is missing required columns {missing_batch_cols}; cannot plot this log.")
+        print(f"   Available columns: {list(df_batch.columns)}")
+        return False
+    if df_epoch.empty:
+        print("❌ Epoch log has no rows; nothing to plot.")
+        return False
+    if df_batch.empty:
+        print("❌ Batch log has no rows; nothing to plot.")
+        return False
 
     # Use detected seed if original seed was None
     final_seed = seed if seed else detected_seed
@@ -164,7 +193,6 @@ def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
     # 图 2: MAE 性能曲线
     # ==========================================
     plt.figure(figsize=(8, 6))
-    train_mae_col, train_mae_label = train_mae_column(df_epoch)
     plt.plot(df_epoch['Epoch'], df_epoch[train_mae_col], label=train_mae_label, color='#9AC9DB')
     plt.plot(df_epoch['Epoch'], df_epoch['Val_MAE'], label='Val MAE', color='#C82423', linestyle='--')
     plt.axvline(x=best_epoch, color='gray', linestyle='--', linewidth=1.5, alpha=0.6)
@@ -239,7 +267,12 @@ def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
     plt.xlabel('Global Step')
     plt.ylabel('Loss')
     limit = df_batch['Total_Loss'].iloc[int(len(df_batch)*0.01):].quantile(0.999) * 1.1
-    plt.ylim(0, limit)
+    if not np.isfinite(limit) or limit <= 0:
+        # Empty/short batch log makes the quantile NaN; fall back to the raw max.
+        fallback = df_batch['Total_Loss'].max()
+        limit = fallback * 1.1 if np.isfinite(fallback) and fallback > 0 else None
+    if limit is not None:
+        plt.ylim(0, limit)
     plt.legend(loc='upper right', frameon=True)
     plt.margins(x=0)
     plt.tight_layout()
@@ -333,6 +366,7 @@ def plot_thesis_suite(seed=None, log_path=None, experiment_id=None):
     plt.close()
 
     print(f"\n🎉 Plots saved to: {current_save_dir}/")
+    return True
 
 if __name__ == '__main__':
     import sys
@@ -424,4 +458,5 @@ if __name__ == '__main__':
     # If user explicitly wants Legacy but training_log.csv is missing, it will error.
     # If user wants Auto, args.seed is None.
     
-    plot_thesis_suite(seed=args.seed, log_path=args.log, experiment_id=args.experiment_id)
+    if not plot_thesis_suite(seed=args.seed, log_path=args.log, experiment_id=args.experiment_id):
+        sys.exit(1)

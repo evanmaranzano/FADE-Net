@@ -1,33 +1,106 @@
 import streamlit as st
 import cv2
 import torch
-import torch.nn.functional as F
 import numpy as np
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 Image.MAX_IMAGE_PIXELS = 25_000_000  # 25 megapixels limit
 import mediapipe as mp
-from PIL import Image
 from torchvision import transforms
 import time
 import pandas as pd
 from collections import deque
 
 import glob
+import io
 import os
 
+# Upload safety limits: reject oversized payloads / decompression bombs before
+# they hit PIL+mediapipe and exhaust memory. A 224x224 age model gains nothing
+# from huge inputs, so these bounds are generous yet safe.
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024   # 15 MB per image
+MAX_IMAGE_PIXELS = 24_000_000         # ~24 MP decoded
+MAX_BATCH_FILES = 20
+MAX_BATCH_UPLOAD_BYTES = 80 * 1024 * 1024
+MAX_BATCH_IMAGE_PIXELS = 80_000_000
+
+
+def uploaded_image_size(file_like) -> tuple[int, int, int]:
+    raw = file_like.getvalue() if hasattr(file_like, "getvalue") else file_like.read()
+    if hasattr(file_like, "seek"):
+        file_like.seek(0)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"Image exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            width, height = img.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise ValueError("Image resolution exceeds the safe processing limit.")
+            return len(raw), width, height
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise ValueError(f"Could not decode image: {type(exc).__name__}") from exc
+
+
+def validate_batch_uploads(files) -> tuple[bool, str]:
+    total_bytes = 0
+    total_pixels = 0
+    for file in files:
+        byte_count, width, height = uploaded_image_size(file)
+        total_bytes += byte_count
+        total_pixels += width * height
+        if total_bytes > MAX_BATCH_UPLOAD_BYTES:
+            return False, f"Batch exceeds {MAX_BATCH_UPLOAD_BYTES // (1024 * 1024)} MB total upload limit."
+        if total_pixels > MAX_BATCH_IMAGE_PIXELS:
+            return False, "Batch resolution exceeds the safe total processing limit."
+    return True, ""
+
+
+def load_uploaded_image(file_like) -> np.ndarray:
+    """Safely decode an uploaded image to an RGB ndarray.
+
+    Raises ValueError on oversized or undecodable input so callers can show a
+    user-facing warning instead of leaking a traceback.
+    """
+    raw = file_like.getvalue() if hasattr(file_like, "getvalue") else file_like.read()
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise ValueError(f"Image exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.")
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
+            width, height = img.size
+            if width * height > MAX_IMAGE_PIXELS:
+                raise ValueError("Image resolution exceeds the safe processing limit.")
+            return np.array(img.convert("RGB"))
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise ValueError(f"Could not decode image: {type(exc).__name__}") from exc
+
+
 # Import local modules
-from config import Config, ROOT_DIR
-from experiment import (
-    build_model_for_checkpoint_load,
-    build_training_metadata,
-    format_metadata_mismatches,
-    inference_checkpoint_metadata_mismatches,
-    inference_compatible_best_model_paths,
-    load_model_state_package,
-    populate_runtime_model_metadata,
-)
-from utils import DLDLProcessor, remap_state_dict_keys
+try:
+    from .config import Config, ROOT_DIR
+    from .experiment import (
+        build_model_for_checkpoint_load,
+        build_training_metadata,
+        format_metadata_mismatches,
+        inference_checkpoint_metadata_mismatches,
+        inference_compatible_best_model_paths,
+        load_model_state_package,
+        populate_runtime_model_metadata,
+    )
+    from .utils import get_dldl_processor, remap_state_dict_keys
+    from .evaluation import predict_probs
+except ImportError:
+    from config import Config, ROOT_DIR
+    from experiment import (
+        build_model_for_checkpoint_load,
+        build_training_metadata,
+        format_metadata_mismatches,
+        inference_checkpoint_metadata_mismatches,
+        inference_compatible_best_model_paths,
+        load_model_state_package,
+        populate_runtime_model_metadata,
+    )
+    from utils import get_dldl_processor, remap_state_dict_keys
+    from evaluation import predict_probs
 
 # ================= Configuration & Styles =================
 st.set_page_config(
@@ -216,10 +289,13 @@ def load_model(model_path=None):
         model.load_state_dict(remap_state_dict_keys(state_dict))
         model.eval()
     except Exception as e:
-        st.error(f"Failed to load model: {e}")
+        # Log full detail server-side; show only a generic message to the client
+        # so checkpoint paths / internal structure are not leaked to the browser.
+        print(f"[web_demo] Failed to load model: {e}")
+        st.error("Failed to load model. See server logs for details.")
         return None, None, None, None, None
         
-    dldl_tools = DLDLProcessor(cfg)
+    dldl_tools = get_dldl_processor(cfg)
     transform = transforms.Compose([
         transforms.Resize((cfg.img_size, cfg.img_size)),
         transforms.ToTensor(),
@@ -230,42 +306,6 @@ def load_model(model_path=None):
     face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
     
     return model, dldl_tools, transform, face_detection, device
-
-# ================= Multi-Scale TTA (6x) =================
-def multi_scale_tta(images, model, base_size=224):
-    """
-    激进 Multi-Scale TTA: 3个尺度 (0.9, 1.0, 1.1) x 2 (原始 + 翻转) = 6x 平均
-    用于 Demo 提升预测精度
-    """
-    scales = [0.9, 1.0, 1.1]
-    all_probs = []
-
-    for scale in scales:
-        if scale != 1.0:
-            new_size = int(base_size * scale)
-            resized = F.interpolate(images, size=new_size, mode='bilinear', align_corners=False)
-            if new_size > base_size:
-                start = (new_size - base_size) // 2
-                resized = resized[:, :, start:start+base_size, start:start+base_size]
-            else:
-                pad = (base_size - new_size) // 2
-                resized = F.pad(resized, (pad, base_size-new_size-pad, pad, base_size-new_size-pad), mode='reflect')
-        else:
-            resized = images
-        
-        # 原始
-        logits = model(resized)
-        probs = F.softmax(logits, dim=1)
-        all_probs.append(probs)
-        
-        # 水平翻转
-        flipped = torch.flip(resized, dims=[3])
-        logits_flip = model(flipped)
-        probs_flip = F.softmax(logits_flip, dim=1)
-        all_probs.append(probs_flip)
-    
-    # 平均 6 个预测
-    return torch.stack(all_probs, dim=0).mean(dim=0)
 
 # ================= Inference Logic =================
 def process_single_image(image_np, model, dldl_tools, transform, face_detection, device, cfg, params):
@@ -301,7 +341,7 @@ def process_single_image(image_np, model, dldl_tools, transform, face_detection,
                 
                 with torch.no_grad():
                     # Multi-Scale TTA (6x: 0.9/1.0/1.1 + flip)
-                    probs = multi_scale_tta(input_tensor, model, base_size=cfg.img_size)
+                    probs = predict_probs(model, input_tensor, mode="multi", base_size=cfg.img_size)
                     
                     # Age Calculation
                     raw_mean = dldl_tools.expectation_regression(probs).item()
@@ -342,7 +382,8 @@ def main():
     try:
         populate_runtime_model_metadata(cfg)
     except Exception as exc:
-        st.error(f"Model config initialization failed: {exc}")
+        print(f"[web_demo] Model config initialization failed: {exc}")
+        st.error("Model config initialization failed.")
         st.info("Check the current Python environment and install project requirements if needed.")
         st.stop()
     compatible_models, incompatible_models = inference_compatible_best_model_paths(ROOT_DIR, cfg, seed=42, device=device_for_scan)
@@ -388,47 +429,58 @@ def main():
             img_input = None
             if src_method == "Upload":
                 f = st.file_uploader("Upload Image", type=["jpg", "png", "jpeg"], accept_multiple_files=False)
-                if f: img_input = np.array(Image.open(f).convert('RGB'))
             else:
                 f = st.camera_input("Take Snapshot")
-                if f: img_input = np.array(Image.open(f).convert('RGB'))
-        
+            if f:
+                try:
+                    img_input = load_uploaded_image(f)
+                except ValueError as exc:
+                    st.warning(str(exc))
+
         if img_input is not None:
-            with st.spinner("Analyzing biometric features..."):
-                results = process_single_image(img_input, model, dldl_tools, transform, face_detection, device, cfg, params)
-            
-            with col_res:
-                if not results:
-                    st.warning("No face detected.")
-                    st.image(img_input, caption="Input", use_container_width=True)
-                else:
-                    # Only show first face for Single Mode
-                    r = results[0]
-                    x1,y1,x2,y2 = r['bbox']
-                    # Draw Box
-                    vis_img = img_input.copy()
-                    cv2.rectangle(vis_img, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                    
-                    st.image(vis_img, caption="Biometric Scan", use_container_width=True)
-                    
-                    # Metrics
-                    m1, m2 = st.columns(2)
-                    m1.metric("Predicted Age", f"{r['mean_age']:.1f}", delta="Mean")
-                    m2.metric("Confidence Interval", r['interval'], delta=">90% Prob")
-                    
-                    st.image(r['dist_chart'], caption="Uncertainty Distribution", use_container_width=True)
+            try:
+                with st.spinner("Analyzing biometric features..."):
+                    results = process_single_image(img_input, model, dldl_tools, transform, face_detection, device, cfg, params)
+            except Exception as exc:  # inference must not crash the app or leak a traceback
+                print(f"[web_demo] Single-image inference failed: {exc}")
+                st.error("Failed to analyze this image. Please try a different one.")
+                results = None
+
+            if results is not None:
+                with col_res:
+                    if not results:
+                        st.warning("No face detected.")
+                        st.image(img_input, caption="Input", use_container_width=True)
+                    else:
+                        # Only show first face for Single Mode
+                        r = results[0]
+                        x1,y1,x2,y2 = r['bbox']
+                        # Draw Box
+                        vis_img = img_input.copy()
+                        cv2.rectangle(vis_img, (x1, y1), (x2, y2), (0, 255, 0), 3)
+
+                        st.image(vis_img, caption="Biometric Scan", use_container_width=True)
+
+                        # Metrics
+                        m1, m2 = st.columns(2)
+                        m1.metric("Predicted Age", f"{r['mean_age']:.1f}", delta="Mean")
+                        m2.metric("Confidence Interval", r['interval'], delta=">90% Prob")
+
+                        st.image(r['dist_chart'], caption="Uncertainty Distribution", use_container_width=True)
 
     # --- Tab 2: Batch Processing ---
     with tab2:
         st.markdown("#### Bulk Analysis")
         files = st.file_uploader("Upload Multiple Images", type=["jpg", "png"], accept_multiple_files=True)
-        MAX_BATCH_FILES = 50
 
         if files:
             if len(files) > MAX_BATCH_FILES:
                 st.warning(f"Too many files. Only the first {MAX_BATCH_FILES} will be processed.")
                 files = files[:MAX_BATCH_FILES]
-            if st.button(f"Process {len(files)} Images"):
+            ok, reason = validate_batch_uploads(files)
+            if not ok:
+                st.warning(reason)
+            elif st.button(f"Process {len(files)} Images"):
                 progress_bar = st.progress(0)
                 batch_results = []
                 
@@ -437,21 +489,26 @@ def main():
                 cols = st.columns(4)
                 
                 for i, file in enumerate(files):
-                    img = np.array(Image.open(file).convert('RGB'))
-                    res = process_single_image(img, model, dldl_tools, transform, face_detection, device, cfg, params)
-                    
-                    age_val = "N/A"
-                    if res:
-                        age_val = f"{res[0]['mean_age']:.1f}"
-                        # Draw simplified box
-                        r = res[0]
-                        cv2.rectangle(img, (r['bbox'][0], r['bbox'][1]), (r['bbox'][2], r['bbox'][3]), (0, 255, 0), 5)
-                    
-                    batch_results.append({"Filename": file.name, "Predicted Age": age_val})
-                    
-                    # Add to gallery
-                    with cols[i % 4]:
-                        st.image(img, caption=f"{file.name}\nAge: {age_val}", use_container_width=True)
+                    try:
+                        img = load_uploaded_image(file)
+                        res = process_single_image(img, model, dldl_tools, transform, face_detection, device, cfg, params)
+
+                        age_val = "N/A"
+                        if res:
+                            age_val = f"{res[0]['mean_age']:.1f}"
+                            # Draw simplified box
+                            r = res[0]
+                            cv2.rectangle(img, (r['bbox'][0], r['bbox'][1]), (r['bbox'][2], r['bbox'][3]), (0, 255, 0), 5)
+
+                        batch_results.append({"Filename": file.name, "Predicted Age": age_val})
+
+                        # Add to gallery
+                        with cols[i % 4]:
+                            st.image(img, caption=f"{file.name}\nAge: {age_val}", use_container_width=True)
+                    except Exception as e:
+                        batch_results.append({"Filename": file.name, "Predicted Age": f"Error: {type(e).__name__}"})
+                        with cols[i % 4]:
+                            st.warning(f"{file.name}: {type(e).__name__}")
                     
                     progress_bar.progress((i + 1) / len(files))
                 

@@ -99,67 +99,76 @@ def ensemble_predict(models, images, mode, base_size, max_augmented_batch_size=N
 
 
 def evaluate_ensemble(models, test_loader, config, device, modes):
+    was_training = [m.training for m in models]
     for m in models:
         m.train(mode=False)
-    mae_sums = {mode: 0.0 for mode in modes}
-    count = 0
+    try:
+        mae_sums = {mode: 0.0 for mode in modes}
+        count = 0
 
-    with torch.no_grad():
-        for images, _labels, ages in tqdm(test_loader, desc="Ensemble Eval"):
-            if images.numel() == 0:
-                continue
+        with torch.no_grad():
+            for images, _labels, ages in tqdm(test_loader, desc="Ensemble Eval"):
+                if images.numel() == 0:
+                    continue
 
-            images = images.to(device)
-            ages = ages.to(device)
+                images = images.to(device)
+                ages = ages.to(device)
 
-            for mode in modes:
-                probs = ensemble_predict(
-                    models, images, mode=mode, base_size=config.img_size,
-                    max_augmented_batch_size=getattr(config, "tta_batch_size", None),
-                )
-                output_ages = probs_to_ages(probs, config.num_classes)
-                mae_sums[mode] += torch.abs(output_ages - ages).sum().item()
-            count += images.size(0)
+                for mode in modes:
+                    probs = ensemble_predict(
+                        models, images, mode=mode, base_size=config.img_size,
+                        max_augmented_batch_size=getattr(config, "tta_batch_size", None),
+                    )
+                    output_ages = probs_to_ages(probs, config.num_classes)
+                    mae_sums[mode] += torch.abs(output_ages - ages).sum().item()
+                count += images.size(0)
 
-    if count == 0:
-        raise RuntimeError("No valid evaluation samples were loaded.")
+        if count == 0:
+            raise RuntimeError("No valid evaluation samples were loaded.")
 
-    return {mode: mae_sums[mode] / count for mode in modes}
+        return {mode: mae_sums[mode] / count for mode in modes}
+    finally:
+        for model, training in zip(models, was_training):
+            model.train(mode=training)
 
 
 def evaluate_uncertainty(model, test_loader, config, device, mode="multi"):
+    was_training = model.training
     model.train(mode=False)
-    mode = normalize_tta_mode(mode)
-    mae_sum = 0.0
-    std_sum = 0.0
-    count = 0
+    try:
+        mode = normalize_tta_mode(mode)
+        mae_sum = 0.0
+        std_sum = 0.0
+        count = 0
 
-    with torch.no_grad():
-        for images, _labels, ages in tqdm(test_loader, desc="Uncertainty Eval"):
-            if images.numel() == 0:
-                continue
+        with torch.no_grad():
+            for images, _labels, ages in tqdm(test_loader, desc="Uncertainty Eval"):
+                if images.numel() == 0:
+                    continue
 
-            images = images.to(device)
-            ages = ages.to(device)
-            mean_probs, _pred_ages, age_std = predict_age_with_uncertainty(
-                model,
-                images,
-                mode=mode,
-                base_size=config.img_size,
-                max_augmented_batch_size=getattr(config, "tta_batch_size", None),
-            )
-            mae_sum += mae_from_probs(mean_probs, ages, config.num_classes)
-            std_sum += age_std.sum().item()
-            count += images.size(0)
+                images = images.to(device)
+                ages = ages.to(device)
+                mean_probs, _pred_ages, age_std = predict_age_with_uncertainty(
+                    model,
+                    images,
+                    mode=mode,
+                    base_size=config.img_size,
+                    max_augmented_batch_size=getattr(config, "tta_batch_size", None),
+                )
+                mae_sum += mae_from_probs(mean_probs, ages, config.num_classes)
+                std_sum += age_std.sum().item()
+                count += images.size(0)
 
-    if count == 0:
-        raise RuntimeError("No valid evaluation samples were loaded.")
+        if count == 0:
+            raise RuntimeError("No valid evaluation samples were loaded.")
 
-    return {
-        "mae": mae_sum / count,
-        "mean_age_std": std_sum / count,
-        "mode": mode,
-    }
+        return {
+            "mae": mae_sum / count,
+            "mean_age_std": std_sum / count,
+            "mode": mode,
+        }
+    finally:
+        model.train(mode=was_training)
 
 
 def main():
@@ -209,8 +218,7 @@ def main():
             print(f"✅ Loaded: {os.path.basename(model_path)}")
         
         if len(models) < 2:
-            print("❌ Need at least 2 models for ensemble!")
-            return
+            raise SystemExit("Need at least 2 models for ensemble.")
         
         metrics = evaluate_ensemble(models, test_loader, cfg, device, modes)
         print(f"\n🏆 Ensemble Test MAE (Seeds {seeds})")
@@ -222,8 +230,7 @@ def main():
         model_path = args.model_path or artifact_path(ROOT_DIR, 'best_model', cfg, args.seed, '.pth')
         
         if not os.path.exists(model_path):
-            print(f"❌ Model not found: {model_path}")
-            return
+            raise SystemExit(f"Model not found: {model_path}")
         
         model = load_checked_model(model_path, cfg, args.seed, device)
         print(f"✅ Loaded: {os.path.basename(model_path)}")

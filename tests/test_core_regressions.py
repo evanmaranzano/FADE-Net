@@ -75,7 +75,7 @@ def test_no_dldl_uses_one_hot_age_targets():
     dist = processor.generate_label_distribution(torch.tensor(10.0))
 
     assert torch.count_nonzero(dist).item() == 1
-    assert dist[10] == pytest.approx(1.0)
+    assert dist[10].item() == pytest.approx(1.0)
     assert torch.isclose(dist.sum(), torch.tensor(1.0), atol=1e-6)
 
 
@@ -89,6 +89,19 @@ def test_ema_skips_frozen_params():
 
     model.weight.requires_grad = True
     ema.register()
+    assert "weight" in ema.shadow
+
+
+def test_ema_register_new_params_only_adds_trainable_params():
+    model = torch.nn.Linear(2, 1)
+    model.weight.requires_grad = False
+    ema = EMAModel(model, decay=0.9)
+
+    ema.register_new_params()
+    assert "weight" not in ema.shadow
+
+    model.weight.requires_grad = True
+    ema.register_new_params()
     assert "weight" in ema.shadow
 
 
@@ -194,20 +207,16 @@ def test_collate_filters_none_and_handles_all_empty_batches():
     assert empty_ages.numel() == 0
 
 
-def test_strict_collate_warns_on_missing_evaluation_samples():
+def test_strict_collate_raises_on_missing_evaluation_samples():
     sample = (torch.ones(1), torch.ones(3), torch.tensor(10.0))
 
-    with pytest.warns(UserWarning, match="Evaluation batch dropping"):
-        result = strict_collate_fn([None, sample])
-    assert result[0].shape[0] == 1
+    with pytest.raises(RuntimeError, match="Evaluation batch contains 1 invalid samples"):
+        strict_collate_fn([None, sample])
 
 
-def test_strict_collate_returns_empty_tensors_on_all_none():
-    with pytest.warns(UserWarning, match="Evaluation batch dropping"):
-        result = strict_collate_fn([None, None])
-    assert len(result) == 3
-    for t in result:
-        assert t.numel() == 0
+def test_strict_collate_raises_on_all_none():
+    with pytest.raises(RuntimeError, match="Evaluation batch contains 2 invalid samples"):
+        strict_collate_fn([None, None])
 
 
 def test_ema_apply_shadow_restore_with_frozen_params():
@@ -223,10 +232,30 @@ def test_ema_apply_shadow_restore_with_frozen_params():
     ema.apply_shadow()
 
     assert torch.equal(model.bias.data, ema.shadow["bias"])
-    assert torch.equal(model.weight.data, model.weight.data)
+    # Frozen weight was never registered in shadow, so apply_shadow must leave it untouched.
+    assert "weight" not in ema.backup
 
     ema.restore()
     assert torch.equal(model.bias.data, original_bias)
+
+
+def test_ema_update_applies_decay_formula():
+    """EMA shadow must follow new = (1-decay)*param + decay*old_shadow."""
+    model = torch.nn.Linear(3, 1)
+    decay = 0.9
+    ema = EMAModel(model, decay=decay)
+
+    old_shadow = ema.shadow["bias"].clone()
+    # Change live params, then update.
+    with torch.no_grad():
+        model.bias.add_(2.0)
+    new_param = model.bias.data.clone()
+    ema.update()
+
+    expected = (1.0 - decay) * new_param + decay * old_shadow
+    assert torch.allclose(ema.shadow["bias"], expected, atol=1e-6)
+    # Live params must be unchanged by update() (shadow is separate).
+    assert torch.equal(model.bias.data, new_param)
 
 
 def test_ema_update_skips_frozen_params():

@@ -218,10 +218,9 @@ def test_checkpoint_extra_state_round_trips_grad_scaler_state():
 
 
 def test_interactive_custom_args_use_formal_split_tag():
-    source = (ROOT_DIR / "src" / "train.py").read_text(encoding="utf-8")
-    custom_block = source[source.index("elif choice == '4':"):source.index("elif choice == 'q':")]
-
-    assert 'split_file_tag="formal_v1"' in custom_block
+    # split_file_tag="formal_v1" is defined in cli.default_args() defaults
+    source = (ROOT_DIR / "src" / "cli.py").read_text(encoding="utf-8")
+    assert 'split_file_tag="formal_v1"' in source
 
 
 def test_batch_mode_fallback_result_path_uses_formal_split_tag():
@@ -377,7 +376,8 @@ def _patch_smoke_training(monkeypatch, tmp_path):
                 "pretrained": cfg.backbone_pretrained,
                 "effective_pretrained": getattr(cfg, "effective_pretrained", cfg.backbone_pretrained),
             },
-            "selection_metric": {"tta": "multi"},
+            "selection_metric": {"tta": "flip"},
+            "test_tta": "multi",
         }
 
     monkeypatch.setattr(train_module, "build_training_metadata", fake_build_training_metadata)

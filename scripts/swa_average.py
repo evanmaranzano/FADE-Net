@@ -40,6 +40,71 @@ from utils import remap_state_dict_keys
 DEFAULT_SWA_SEEDS = (42, 3407, 2026, 1337)
 
 
+def _uses_ema_weights(checkpoint):
+    metadata = checkpoint.get("metadata", {}) if isinstance(checkpoint, dict) else {}
+    ema_metadata = metadata.get("ema", {}) if isinstance(metadata, dict) else {}
+    return bool(ema_metadata.get("use_ema", False))
+
+
+def _effective_swa_state(checkpoint, path):
+    model_state = checkpoint["model_state_dict"]
+    if not isinstance(model_state, dict):
+        raise RuntimeError(f"Checkpoint model_state_dict is not a state dict: {path}")
+    if not _uses_ema_weights(checkpoint):
+        return model_state, None
+
+    if "ema_state_dict" not in checkpoint:
+        raise RuntimeError(f"Checkpoint metadata declares use_ema=True but ema_state_dict is missing: {path}")
+    ema_state = checkpoint["ema_state_dict"]
+    if not isinstance(ema_state, dict):
+        raise RuntimeError(f"Checkpoint ema_state_dict is not a state dict: {path}")
+
+    stale_ema_keys = set(ema_state) - set(model_state)
+    if stale_ema_keys:
+        raise RuntimeError(f"EMA state has keys not present in model_state_dict: {sorted(stale_ema_keys)}")
+    return {k: ema_state.get(k, v) for k, v in model_state.items()}, set(ema_state)
+
+
+def _validate_same_schema(reference_state, state_dict, path):
+    reference_keys = set(reference_state)
+    state_keys = set(state_dict)
+    if state_keys != reference_keys:
+        missing = sorted(reference_keys - state_keys)
+        extra = sorted(state_keys - reference_keys)
+        raise RuntimeError(f"Checkpoint state_dict key mismatch for {path}; missing={missing}, extra={extra}")
+    for key, reference_value in reference_state.items():
+        value = state_dict[key]
+        if tuple(value.shape) != tuple(reference_value.shape):
+            raise RuntimeError(
+                f"Checkpoint state_dict shape mismatch for {path}: {key} "
+                f"expected={tuple(reference_value.shape)} got={tuple(value.shape)}"
+            )
+        if value.dtype != reference_value.dtype:
+            raise RuntimeError(
+                f"Checkpoint state_dict dtype mismatch for {path}: {key} "
+                f"expected={reference_value.dtype} got={value.dtype}"
+            )
+
+
+def _add_state(avg_state, state_dict):
+    for key, value in state_dict.items():
+        if torch.is_floating_point(value) or torch.is_complex(value):
+            avg_state[key] += value.detach().to(dtype=torch.float32)
+        elif not torch.equal(avg_state[key], value):
+            raise RuntimeError(f"Non-floating checkpoint buffer differs across SWA checkpoints: {key}")
+
+
+def _finalize_average_state(avg_state, reference_state, n):
+    averaged = {}
+    for key, value in avg_state.items():
+        reference_value = reference_state[key]
+        if torch.is_floating_point(reference_value) or torch.is_complex(reference_value):
+            averaged[key] = (value / n).to(dtype=reference_value.dtype)
+        else:
+            averaged[key] = value.clone()
+    return averaged
+
+
 def average_checkpoints(checkpoint_paths, device='cpu'):
     """
     Average model weights from multiple checkpoints.
@@ -47,6 +112,8 @@ def average_checkpoints(checkpoint_paths, device='cpu'):
     print(f"📊 Averaging {len(checkpoint_paths)} checkpoints...")
     
     avg_state = None
+    reference_state = None
+    reference_ema_keys = None
     metadata = None
     n = len(checkpoint_paths)
     
@@ -59,19 +126,23 @@ def average_checkpoints(checkpoint_paths, device='cpu'):
             metadata = checkpoint.get("metadata", {})
         elif checkpoint.get("metadata", {}) != metadata:
             raise RuntimeError(f"Checkpoint metadata mismatch; refusing to average: {path}")
-        state_dict = checkpoint['model_state_dict']
+        state_dict, ema_keys = _effective_swa_state(checkpoint, path)
+        if reference_ema_keys is None:
+            reference_ema_keys = ema_keys
+        elif ema_keys != reference_ema_keys:
+            raise RuntimeError(f"Checkpoint ema_state_dict key mismatch; refusing to average: {path}")
         
         if avg_state is None:
-            avg_state = {k: v.clone().float() for k, v in state_dict.items()}
+            reference_state = {k: v.detach().clone() for k, v in state_dict.items()}
+            avg_state = {
+                k: v.detach().clone().to(dtype=torch.float32) if torch.is_floating_point(v) or torch.is_complex(v) else v.detach().clone()
+                for k, v in state_dict.items()
+            }
         else:
-            for k in avg_state.keys():
-                avg_state[k] += state_dict[k].float()
+            _validate_same_schema(reference_state, state_dict, path)
+            _add_state(avg_state, state_dict)
     
-    # Divide by number of checkpoints
-    for k in avg_state.keys():
-        avg_state[k] /= n
-    
-    return avg_state, metadata
+    return _finalize_average_state(avg_state, reference_state, n), metadata
 
 
 def discover_checkpoint_seeds(root_dir, cfg, epoch=111, candidate_seeds=DEFAULT_SWA_SEEDS):
@@ -125,10 +196,16 @@ def main():
     cfg = Config()
     apply_common_overrides(cfg, args)
     populate_runtime_model_metadata(cfg)
-    _, _, test_loader, _ = get_dataloaders(cfg)
+    test_loader = None
+    if args.eval:
+        _, _, test_loader, _ = get_dataloaders(cfg)
     
     # Parse epoch range
     start_epoch, end_epoch = map(int, args.epochs.split('-'))
+    if start_epoch < 1 or end_epoch < start_epoch:
+        raise ValueError(f"Invalid epoch range: {args.epochs!r}. Expected START-END with 1 <= START <= END.")
+    if end_epoch - start_epoch > 100:
+        raise ValueError(f"Epoch range too large ({end_epoch - start_epoch} epochs). Max supported: 100.")
 
     # Determine seeds to process
     if args.seed:
@@ -139,10 +216,10 @@ def main():
         print(f"🔍 Auto-detected seeds: {seeds}")
     
     if not seeds:
-        print("❌ No checkpoint files found!")
-        return
-    
+        raise SystemExit("No checkpoint files found.")
+
     results = {}
+    generated_paths = []
     
     for seed in seeds:
         print(f"\n{'='*60}")
@@ -162,9 +239,8 @@ def main():
             print(f"⚠️ Not enough checkpoints for Seed {seed} (found {len(checkpoint_paths)})")
             continue
         
-        # Average checkpoints
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        avg_state, metadata = average_checkpoints(checkpoint_paths, device)
+        # Average checkpoints on CPU; evaluation may move the averaged model to GPU later.
+        avg_state, metadata = average_checkpoints(checkpoint_paths, "cpu")
         expected_metadata = build_training_metadata(cfg, seed)
         mismatches = checkpoint_metadata_mismatches({"metadata": metadata}, expected_metadata)
         if mismatches:
@@ -184,18 +260,20 @@ def main():
         if os.path.exists(swa_path) and not args.overwrite:
             raise RuntimeError(f"SWA artifact already exists: {swa_path}. Use --overwrite only after archiving or intentionally replacing it.")
         torch.save({"model_state_dict": avg_state, "metadata": metadata}, swa_path)
+        generated_paths.append(swa_path)
         print(f"✅ SWA model saved: {swa_path}")
         
         # Evaluate if requested
         if args.eval:
             print(f"\n📊 Evaluating SWA model...")
-            
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
             model = build_model_for_checkpoint_load(cfg)
             model.load_state_dict(remap_state_dict_keys(avg_state))
             model.to(device)
             
             test_metrics = evaluate_mae(model, test_loader, cfg, device, modes=TTA_MODES)
-            selected_tta = metadata.get("selection_metric", {}).get("tta", "multi")
+            selected_tta = metadata.get("test_tta", (metadata.get("selection_metric") or {}).get("tta", "multi"))
             test_mae = test_metrics[selected_tta]
             print(f"🏆 SWA Test MAE (Seed {seed}, TTA={selected_tta}): {test_mae:.4f}")
             for mode in TTA_MODES:
@@ -216,6 +294,9 @@ def main():
                 print(f"📋 Original Best MAE: {orig_mae:.4f}")
                 print(f"📈 Improvement: {orig_mae - test_mae:+.4f}")
     
+    if not generated_paths:
+        raise SystemExit("No SWA artifacts were generated.")
+
     if results:
         print(f"\n{'='*60}")
         print("📊 Summary")

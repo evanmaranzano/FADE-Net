@@ -11,7 +11,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = ROOT_DIR / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 
-from plot_results import experiment_id_from_log_path, infer_batch_log_path, load_real_data
+from plot_results import experiment_id_from_log_path, infer_batch_log_path, load_real_data, plot_thesis_suite
 
 
 class PlotResultsTests(unittest.TestCase):
@@ -47,6 +47,41 @@ class PlotResultsTests(unittest.TestCase):
         self.assertEqual(1, len(df_batch))
         self.assertEqual("FADE-Net_A7_seed42", seed)
         self.assertEqual("FADE-Net_A7_seed42", experiment_id)
+
+    def test_plot_thesis_suite_returns_before_creating_dir_when_epoch_columns_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                epoch_log = Path("training_log_FADE-Net_A7_seed42.csv")
+                batch_log = Path("batch_log_FADE-Net_A7_seed42.csv")
+                pd.DataFrame([{"Epoch": 1, "Val_MAE": 3.0, "Train_Loss": 1.0, "LR": 1e-3}]).to_csv(epoch_log, index=False)
+                pd.DataFrame([{"Epoch": 1, "Total_Loss": 1.0}]).to_csv(batch_log, index=False)
+
+                self.assertFalse(plot_thesis_suite(log_path=str(epoch_log)))
+
+                self.assertFalse(Path("plots").exists())
+            finally:
+                os.chdir(old_cwd)
+
+    def test_plot_thesis_suite_returns_before_creating_dir_when_batch_columns_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(tmpdir)
+                epoch_log = Path("training_log_FADE-Net_A7_seed42.csv")
+                batch_log = Path("batch_log_FADE-Net_A7_seed42.csv")
+                pd.DataFrame([{
+                    "Epoch": 1, "Val_MAE": 3.0, "Train_Loss": 1.0,
+                    "Train_Mixup_MAE": 3.2, "LR": 1e-3, "Time": 1.0,
+                }]).to_csv(epoch_log, index=False)
+                pd.DataFrame([{"Epoch": 1, "Loss": 1.0}]).to_csv(batch_log, index=False)
+
+                self.assertFalse(plot_thesis_suite(log_path=str(epoch_log)))
+
+                self.assertFalse(Path("plots").exists())
+            finally:
+                os.chdir(old_cwd)
 
 
 if __name__ == "__main__":

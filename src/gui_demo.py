@@ -1,7 +1,6 @@
 import sys
 import cv2
 import torch
-import torch.nn.functional as F
 import numpy as np
 import mediapipe as mp
 import time
@@ -19,16 +18,30 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
 from PyQt5.QtCore import QThread, pyqtSignal, Qt, QTimer, QPointF, QPoint
 from PyQt5.QtGui import QImage, QPixmap, QFont, QPainter, QColor, QPen, QBrush
 
-from config import Config, ROOT_DIR # Added ROOT_DIR
-from experiment import (
-    build_model_for_checkpoint_load,
-    build_training_metadata,
-    format_metadata_mismatches,
-    inference_checkpoint_metadata_mismatches,
-    inference_compatible_best_model_paths,
-    load_model_state_package,
-)
-from utils import DLDLProcessor, remap_state_dict_keys
+try:
+    from .config import Config, ROOT_DIR # Added ROOT_DIR
+    from .experiment import (
+        build_model_for_checkpoint_load,
+        build_training_metadata,
+        format_metadata_mismatches,
+        inference_checkpoint_metadata_mismatches,
+        inference_compatible_best_model_paths,
+        load_model_state_package,
+    )
+    from .utils import get_dldl_processor, remap_state_dict_keys
+    from .evaluation import predict_probs
+except ImportError:
+    from config import Config, ROOT_DIR # Added ROOT_DIR
+    from experiment import (
+        build_model_for_checkpoint_load,
+        build_training_metadata,
+        format_metadata_mismatches,
+        inference_checkpoint_metadata_mismatches,
+        inference_compatible_best_model_paths,
+        load_model_state_package,
+    )
+    from utils import get_dldl_processor, remap_state_dict_keys
+    from evaluation import predict_probs
 
 # ================= 样式表 =================
 STYLESHEET = """
@@ -262,43 +275,6 @@ def draw_distribution_chart(prob_dist, width=400, height=200, peak_age=None, exp
     
     return canvas
 
-# ================= Multi-Scale TTA (6x) =================
-def multi_scale_tta(images, model, base_size=224):
-    """
-    激进 Multi-Scale TTA: 3个尺度 (0.9, 1.0, 1.1) x 2 (原始 + 翻转) = 6x 平均
-    用于 Demo 提升预测精度
-    """
-    scales = [0.9, 1.0, 1.1]
-    all_probs = []
-
-    for scale in scales:
-        if scale != 1.0:
-            new_size = int(base_size * scale)
-            resized = F.interpolate(images, size=new_size, mode='bilinear', align_corners=False)
-            if new_size > base_size:
-                start = (new_size - base_size) // 2
-                resized = resized[:, :, start:start+base_size, start:start+base_size]
-            else:
-                pad = (base_size - new_size) // 2
-                resized = F.pad(resized, (pad, base_size-new_size-pad, pad, base_size-new_size-pad), mode='reflect')
-        else:
-            resized = images
-        
-        # 原始
-        logits = model(resized)
-        probs = F.softmax(logits, dim=1)
-        all_probs.append(probs)
-        
-        # 水平翻转
-        flipped = torch.flip(resized, dims=[3])
-        logits_flip = model(flipped)
-        probs_flip = F.softmax(logits_flip, dim=1)
-        all_probs.append(probs_flip)
-    
-    # 平均 6 个预测
-    return torch.stack(all_probs, dim=0).mean(dim=0)
-
-
 def load_compatible_weights(model, cfg, model_path, device, seed=42):
     state_dict, checkpoint = load_model_state_package(model_path, device)
     expected_metadata = build_training_metadata(cfg, seed)
@@ -369,7 +345,7 @@ class WorkerThread(QThread):
     
 
         print("DEBUG: Initializing DLDLProcessor...", flush=True)
-        self.dldl_tools = DLDLProcessor(self.cfg)
+        self.dldl_tools = get_dldl_processor(self.cfg)
         print("DEBUG: Initializing Transforms...", flush=True)
         self.transform = transforms.Compose([
             transforms.Resize((self.cfg.img_size, self.cfg.img_size)),
@@ -387,6 +363,50 @@ class WorkerThread(QThread):
         self.mean_buffer.clear()
         self.peak_buffer.clear()
 
+    # Bound the local image path to guard against decompression bombs / OOM:
+    # cv2 has no MAX_IMAGE_PIXELS equivalent, so we cap file bytes and decoded pixels.
+    _MAX_IMAGE_BYTES = 30 * 1024 * 1024   # 30 MB
+    _MAX_IMAGE_PIXELS = 40_000_000        # ~40 MP
+    _MAX_VIDEO_BYTES = 1 * 1024 * 1024 * 1024
+    _MAX_VIDEO_PIXELS = 4_000_000
+    _MAX_VIDEO_FRAMES = 18_000
+
+    def _safe_imread(self, path):
+        try:
+            if os.path.getsize(path) > self._MAX_IMAGE_BYTES:
+                print(f"❌ 图片过大（超过 {self._MAX_IMAGE_BYTES // (1024 * 1024)}MB），已拒绝")
+                return None
+            frame = cv2.imdecode(np.fromfile(path, dtype=np.uint8), -1)
+        except (OSError, ValueError) as exc:
+            print(f"❌ 读取图片失败: {type(exc).__name__}: {exc}")
+            return None
+        if frame is None:
+            return None
+        h, w = frame.shape[:2]
+        if h * w > self._MAX_IMAGE_PIXELS:
+            print("❌ 图片分辨率超过安全处理上限，已拒绝")
+            return None
+        return frame
+
+    def _video_is_safe(self, path, cap):
+        try:
+            if isinstance(path, str) and os.path.exists(path) and os.path.getsize(path) > self._MAX_VIDEO_BYTES:
+                print(f"❌ 视频过大（超过 {self._MAX_VIDEO_BYTES // (1024 * 1024)}MB），已拒绝")
+                return False
+        except OSError as exc:
+            print(f"❌ 检查视频失败: {type(exc).__name__}: {exc}")
+            return False
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        if frame_count > self._MAX_VIDEO_FRAMES:
+            print("❌ 视频帧数超过安全处理上限，已拒绝")
+            return False
+        if width > 0 and height > 0 and width * height > self._MAX_VIDEO_PIXELS:
+            print("❌ 视频分辨率超过安全处理上限，已拒绝")
+            return False
+        return True
+
     def run(self):
         self._run_flag = True
         if not self.model_loaded:
@@ -398,8 +418,8 @@ class WorkerThread(QThread):
         
         try:
             if self.mode == 'image':
-                origin_frame = cv2.imdecode(np.fromfile(self.source_path, dtype=np.uint8), -1)
-                if origin_frame is None: 
+                origin_frame = self._safe_imread(self.source_path)
+                if origin_frame is None:
                     print("❌ 错误：无法读取图片")
                     self._run_flag = False
                 cap = None
@@ -409,9 +429,11 @@ class WorkerThread(QThread):
                     cap = cv2.VideoCapture(self.source_path, cv2.CAP_DSHOW)
                     # Optimize caching for low latency
                     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                else: 
+                else:
                     cap = cv2.VideoCapture(self.source_path)
-                
+                    if self.mode == 'video' and not self._video_is_safe(self.source_path, cap):
+                        self._run_flag = False
+
                 if not cap.isOpened():
                     print("❌ 错误：无法打开摄像头")
                     self._run_flag = False
@@ -428,11 +450,7 @@ class WorkerThread(QThread):
                     if cap is None or not cap.isOpened(): break
                     ret, frame = cap.read()
                     if not ret:
-                        if self.mode == 'video':
-                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                            continue
-                        else:
-                            break
+                        break
                     if self.mode == 'camera':
                         frame = cv2.flip(frame, 1)
 
@@ -469,8 +487,8 @@ class WorkerThread(QThread):
                             input_tensor = self.transform(pil_img).unsqueeze(0).to(self.device)
                             
                             with torch.no_grad():
-                                # === Multi-Scale TTA (6x: 0.9/1.0/1.1 + flip) ===
-                                probs = multi_scale_tta(input_tensor, self.model, base_size=self.cfg.img_size)
+                                # === Multi-Scale TTA via evaluation module ===
+                                probs = predict_probs(self.model, input_tensor, mode="multi", base_size=self.cfg.img_size)
                                 
                                 raw_mean = self.dldl_tools.expectation_regression(probs).item()
                                 raw_peak = torch.argmax(probs, dim=1).item()

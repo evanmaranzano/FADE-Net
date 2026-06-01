@@ -74,6 +74,75 @@ class PaperResultSummaryTests(unittest.TestCase):
         self.assertEqual("3.5000", by_name["A7:timm/mobilenetv4_conv_small"]["mean_selected_test_mae"])
         self.assertEqual("missing", by_name["torchvision/mobilenet_v3_large"]["status"])
 
+    def test_summary_rejects_duplicate_ready_rows(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit = Path(tmpdir) / "audit.csv"
+            rows = [
+                {
+                    "ablation_id": "A3", "source": "timm", "backbone": "mobilenetv4_conv_small",
+                    "seed": "42", "status": "paper-ready", "selected_test_mae": "3.6",
+                    "mae_raw": "3.6", "mae_flip": "3.5", "mae_multi": "3.6",
+                },
+                {
+                    "ablation_id": "A3", "source": "timm", "backbone": "mobilenetv4_conv_small",
+                    "seed": "42", "status": "paper-ready", "selected_test_mae": "3.7",
+                    "mae_raw": "3.7", "mae_flip": "3.6", "mae_multi": "3.7",
+                },
+            ]
+            with audit.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                build_summary([audit], candidates=["A3:timm/mobilenetv4_conv_small"], seeds=[42])
+
+    def test_summary_marks_invalid_metric_row_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit = Path(tmpdir) / "audit.csv"
+            rows = [{
+                "ablation_id": "A3", "source": "timm", "backbone": "mobilenetv4_conv_small",
+                "seed": "42", "status": "paper-ready", "selected_test_mae": "bad",
+                "mae_raw": "3.6", "mae_flip": "3.5", "mae_multi": "3.6",
+            }]
+            with audit.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+
+            summary = build_summary([audit], candidates=["A3:timm/mobilenetv4_conv_small"], seeds=[42])
+
+        self.assertEqual("missing", summary[0]["status"])
+        self.assertEqual("42", summary[0]["missing_seeds"])
+
+    def test_summary_marks_invalid_non_first_metric_row_missing_without_partial_append(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit = Path(tmpdir) / "audit.csv"
+            rows = [
+                {
+                    "ablation_id": "A3", "source": "timm", "backbone": "mobilenetv4_conv_small",
+                    "seed": "42", "status": "paper-ready", "selected_test_mae": "3.6",
+                    "mae_raw": "bad", "mae_flip": "3.5", "mae_multi": "3.6",
+                },
+                {
+                    "ablation_id": "A3", "source": "timm", "backbone": "mobilenetv4_conv_small",
+                    "seed": "3407", "status": "paper-ready", "selected_test_mae": "3.8",
+                    "mae_raw": "3.8", "mae_flip": "3.7", "mae_multi": "3.8",
+                },
+            ]
+            with audit.open("w", encoding="utf-8", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+
+            summary = build_summary([audit], candidates=["A3:timm/mobilenetv4_conv_small"], seeds=[42, 3407])
+
+        self.assertEqual("partial", summary[0]["status"])
+        self.assertEqual("3407", summary[0]["ready_seeds"])
+        self.assertEqual("42", summary[0]["missing_seeds"])
+        self.assertEqual("3.8000", summary[0]["mean_selected_test_mae"])
+        self.assertEqual("", summary[0]["std_selected_test_mae"])
+
     def test_markdown_warns_partial_rows_are_not_final(self):
         rows = [
             {

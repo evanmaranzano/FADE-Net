@@ -5,8 +5,10 @@ import torch.nn.functional as F
 
 try:
     from .backbones import build_backbone
+    from .experiment import set_derived_attrs
 except ImportError:
     from backbones import build_backbone
+    from experiment import set_derived_attrs
 
 
 class CoordAtt(nn.Module):
@@ -226,22 +228,24 @@ class LightweightAgeEstimator(nn.Module):
                 count=getattr(config, "hybrid_attention_blocks", 4),
             )
             self.hybrid_attention_replaced_blocks = tuple(replaced)
-            config.hybrid_attention_replaced_blocks = self.hybrid_attention_replaced_blocks
+            set_derived_attrs(config, {"hybrid_attention_replaced_blocks": self.hybrid_attention_replaced_blocks})
             if not replaced:
                 print("[Model] Backbone has no replaceable SE blocks; HA is skipped for this backbone.")
         else:
             print("[Model] Hybrid Attention: DISABLED")
             self.hybrid_attention_replaced_blocks = ()
-            config.hybrid_attention_replaced_blocks = ()
+            set_derived_attrs(config, {"hybrid_attention_replaced_blocks": ()})
 
         if self.use_multi_scale:
             print("[Model] Multi-Scale Fusion: ENABLED")
             self.feature_spec = self.backbone.infer_feature_spec(config.img_size, configured_msff_indices)
             self.msff_indices = (self.feature_spec.shallow_index, self.feature_spec.mid_index)
-            config.effective_msff_feature_indices = self.msff_indices
-            config.effective_msff_channels = (self.feature_spec.shallow_channels, self.feature_spec.mid_channels)
-            config.effective_msff_spatial = (self.feature_spec.shallow_spatial, self.feature_spec.mid_spatial)
-            config.effective_deep_channels = self.feature_spec.out_channels
+            set_derived_attrs(config, {
+                "effective_msff_feature_indices": self.msff_indices,
+                "effective_msff_channels": (self.feature_spec.shallow_channels, self.feature_spec.mid_channels),
+                "effective_msff_spatial": (self.feature_spec.shallow_spatial, self.feature_spec.mid_spatial),
+                "effective_deep_channels": self.feature_spec.out_channels,
+            })
             fusion_dim = getattr(config, "fusion_dim", 64)
             fusion_out_dim = getattr(config, "fusion_out_dim", 128)
 
@@ -265,10 +269,12 @@ class LightweightAgeEstimator(nn.Module):
             print("[Model] Multi-Scale Fusion: DISABLED")
             self.feature_spec = None
             self.msff_indices = ()
-            config.effective_msff_feature_indices = ()
-            config.effective_msff_channels = ()
-            config.effective_msff_spatial = ()
-            config.effective_deep_channels = self.last_channel
+            set_derived_attrs(config, {
+                "effective_msff_feature_indices": (),
+                "effective_msff_channels": (),
+                "effective_msff_spatial": (),
+                "effective_deep_channels": self.last_channel,
+            })
             fusion_out_dim = 0
 
         if self.use_spp:

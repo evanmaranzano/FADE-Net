@@ -106,6 +106,41 @@ def test_moe_batch_balance_loss_matches_soft_age_bin_usage():
     assert collapsed > balanced
 
 
+def test_moe_logged_regularization_matches_total_loss_contribution():
+    """Logged MoE value should be the weighted gate+balance term included in total loss."""
+    cfg = Config()
+    cfg.use_moe = True
+    cfg.use_dldl_v2 = False
+    cfg.use_mv_loss = False
+    cfg.lambda_l1 = 0.0
+    cfg.lambda_rank = 0.0
+    cfg.lambda_moe_gate = 0.5
+    cfg.lambda_moe_balance = 2.0
+    criterion = CombinedLoss(cfg)
+    logits = torch.zeros(3, cfg.num_classes)
+    log_probs = torch.log_softmax(logits, dim=1)
+    target_dists = torch.zeros(3, cfg.num_classes)
+    target_dists[0, 5] = 1.0
+    target_dists[1, 35] = 1.0
+    target_dists[2, 70] = 1.0
+    true_ages = torch.tensor([5.0, 35.0, 70.0])
+    gate_logits = torch.tensor([
+        [8.0, 0.0, 0.0],
+        [8.0, 0.0, 0.0],
+        [8.0, 0.0, 0.0],
+    ])
+
+    total, kl, *_rest, logged_moe, _pred_age = criterion(
+        log_probs,
+        target_dists,
+        true_ages,
+        logits,
+        extras={"moe_gate_logits": gate_logits},
+    )
+
+    assert torch.allclose(logged_moe, total.detach() - kl, atol=1e-6)
+
+
 def test_moe_disabled():
     """Model without MoE should use standard head."""
     cfg = Config()

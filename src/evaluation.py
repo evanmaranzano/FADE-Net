@@ -56,12 +56,30 @@ def _forward_augmented_probs(model, views, max_augmented_batch_size: int | None 
     if chunk_size <= 0:
         raise ValueError("max_augmented_batch_size must be positive when provided.")
 
-    # Collect all logits first, then apply softmax globally for correct normalization.
     all_logits = []
-    augmented = torch.cat(views, dim=0)
-    for start in range(0, total_size, chunk_size):
-        chunk_logits = model(augmented[start:start + chunk_size])
-        all_logits.append(chunk_logits)
+    chunk = []
+    chunk_items = 0
+
+    def flush_chunk():
+        nonlocal chunk, chunk_items
+        if not chunk:
+            return
+        augmented = chunk[0] if len(chunk) == 1 else torch.cat(chunk, dim=0)
+        all_logits.append(model(augmented))
+        chunk = []
+        chunk_items = 0
+
+    for view in views:
+        start = 0
+        while start < view.size(0):
+            take = min(chunk_size - chunk_items, view.size(0) - start)
+            slice_ = view[start:start + take]
+            chunk.append(slice_)
+            chunk_items += slice_.size(0)
+            start += take
+            if chunk_items == chunk_size:
+                flush_chunk()
+    flush_chunk()
 
     logits = torch.cat(all_logits, dim=0)
     probs = F.softmax(logits, dim=1)

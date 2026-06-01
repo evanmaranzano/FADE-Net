@@ -1,19 +1,38 @@
 import os
 import math
-import warnings
 import torch
 import numpy as np
 import json
 import random
 import hashlib
+import re
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader, ConcatDataset, Subset
 from torchvision import transforms
-from utils import DLDLProcessor
-from config import Config, ROOT_DIR
+try:
+    from .utils import get_dldl_processor
+    from .config import Config, ROOT_DIR
+except ImportError:
+    from utils import get_dldl_processor
+    from config import Config, ROOT_DIR
+try:
+    from .experiment import set_derived_attrs
+except ImportError:
+    from experiment import set_derived_attrs
 from collections import Counter, defaultdict
 from scipy.ndimage import gaussian_filter1d
-from experiment import optional_sanitize_token
+
+
+def _sanitize_token(value):
+    """Sanitize user-provided token for safe filesystem paths."""
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value).strip())
+    return token.strip("._-") or "unset"
+
+
+def _optional_sanitize_token(value):
+    if value is None or str(value).strip() == "":
+        return None
+    return _sanitize_token(value)
 
 
 class CachedSplitMetadataMismatchError(ValueError):
@@ -37,10 +56,7 @@ def my_collate_fn(batch):
 def strict_collate_fn(batch):
     if any(x is None for x in batch):
         missing = sum(1 for x in batch if x is None)
-        warnings.warn(f"Evaluation batch dropping {missing} invalid samples (corrupt images)")
-        batch = [x for x in batch if x is not None]
-        if len(batch) == 0:
-            return torch.tensor([]), torch.tensor([]), torch.tensor([])
+        raise RuntimeError(f"Evaluation batch contains {missing} invalid samples (corrupt images)")
     return torch.utils.data.dataloader.default_collate(batch)
 
 
@@ -104,7 +120,7 @@ def _write_split_json(save_path, train_indices, val_indices, test_indices, datas
 
 
 def split_filename_with_tag(filename, split_file_tag):
-    tag = optional_sanitize_token(split_file_tag)
+    tag = _optional_sanitize_token(split_file_tag)
     if not tag:
         return filename
     stem, extension = os.path.splitext(filename)
@@ -234,7 +250,7 @@ class AFADDataset(Dataset):
             raise ValueError("AFADDataset requires a valid Config instance")
         self.transform = transform
         self.config = config
-        self.dldl_proc = DLDLProcessor(config)
+        self.dldl_proc = get_dldl_processor(config)
         self.image_paths = []
         self.ages = []
         
@@ -297,14 +313,14 @@ class SubsetWithTransform(Dataset):
         self.augment_label = augment_label
         self.config = config
         self.retry_on_none = retry_on_none
-        self.dldl_proc = DLDLProcessor(config) if config else None
+        self.dldl_proc = get_dldl_processor(config) if config else None
         
     def __getitem__(self, idx):
         item = self.subset[idx]
         if item is None and self.retry_on_none:
-            retry_indices = list(range(len(self.subset)))
-            random.shuffle(retry_indices)
-            for retry_idx in retry_indices:
+            max_retries = min(max(10, len(self.subset)), 20)
+            for _ in range(max_retries):
+                retry_idx = random.randint(0, len(self.subset) - 1)
                 if retry_idx == idx:
                     continue
                 item = self.subset[retry_idx]
@@ -568,7 +584,7 @@ def get_dataloaders(config):
         target_ratios = (0.80, 0.10, 0.10)
         split_filename = f"dataset_split_{dataset_prefix}_80_10_10.json"
         
-    split_file_tag = optional_sanitize_token(getattr(config, "split_file_tag", None))
+    split_file_tag = _optional_sanitize_token(getattr(config, "split_file_tag", None))
     split_filename = split_filename_with_tag(split_filename, split_file_tag)
     if split_file_tag:
         print(f"🏷️ Split File Tag: {split_file_tag}")
@@ -587,13 +603,15 @@ def get_dataloaders(config):
     if os.path.exists(split_path):
         with open(split_path, encoding="utf-8") as f:
             split_metadata = json.load(f).get("_metadata", {})
-    config.split_metadata = {
-        "split_file": split_filename,
-        "split_file_tag": split_file_tag,
-        "fingerprint": file_sha256(split_path) if os.path.exists(split_path) else None,
-        "dataset_fingerprint": current_dataset_fingerprint,
-        "legacy_upgraded": bool(split_metadata.get("legacy_upgraded", False)),
-    }
+    set_derived_attrs(config, {
+        "split_metadata": {
+            "split_file": split_filename,
+            "split_file_tag": split_file_tag,
+            "fingerprint": file_sha256(split_path) if os.path.exists(split_path) else None,
+            "dataset_fingerprint": current_dataset_fingerprint,
+            "legacy_upgraded": bool(split_metadata.get("legacy_upgraded", False)),
+        }
+    })
 
     # LDS Weights based on TRAIN distribution only (avoid val/test leakage)
     class_weights = None

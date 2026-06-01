@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -93,12 +94,73 @@ def validate_float_field(metrics, key, reasons):
     value = metrics.get(key, "")
     if value == "":
         reasons.append(f"missing result metric: {key}")
-        return ""
+        return None
     try:
-        float(value)
+        parsed = float(value)
     except ValueError:
         reasons.append(f"invalid numeric metric {key}: {value!r}")
-    return value
+        return None
+    if not math.isfinite(parsed):
+        reasons.append(f"non-finite numeric metric {key}: {value!r}")
+        return None
+    return parsed
+
+
+def validate_selected_metric(metrics, reasons):
+    selected_tta = metrics.get("selected_tta")
+    if selected_tta != "multi":
+        reasons.append(f"selected_tta must be 'multi', got {selected_tta!r}")
+        return
+    selected = validate_float_field(metrics, "selected_test_mae", reasons)
+    selected_metric = validate_float_field(metrics, f"mae_{selected_tta}", reasons)
+    if selected is None or selected_metric is None:
+        return
+    if not math.isclose(selected, selected_metric, rel_tol=0.0, abs_tol=5e-4):
+        reasons.append(
+            f"selected_test_mae mismatch: selected={selected:.6f}, "
+            f"mae_{selected_tta}={selected_metric:.6f}"
+        )
+
+
+def validate_split_payload(split_payload, reasons):
+    if not isinstance(split_payload, dict):
+        reasons.append("split file payload is not a JSON object")
+        return
+    for key in ("train", "val", "test"):
+        values = split_payload.get(key)
+        if not isinstance(values, list):
+            reasons.append(f"split {key!r} is missing or not a list")
+            continue
+        if any(not isinstance(index, int) or isinstance(index, bool) for index in values):
+            reasons.append(f"split {key!r} contains non-integer indices")
+            continue
+        if any(index < 0 for index in values):
+            reasons.append(f"split {key!r} contains negative indices")
+            continue
+        if len(values) != len(set(values)):
+            reasons.append(f"split {key!r} contains duplicate indices")
+
+    split_sets = {
+        key: set(split_payload.get(key, []))
+        for key in ("train", "val", "test")
+        if isinstance(split_payload.get(key), list)
+        and all(isinstance(index, int) and not isinstance(index, bool) for index in split_payload.get(key))
+    }
+    for left, right in (("train", "val"), ("train", "test"), ("val", "test")):
+        overlap = split_sets.get(left, set()) & split_sets.get(right, set())
+        if overlap:
+            reasons.append(f"split overlap between {left} and {right}: {sorted(overlap)[:10]}")
+
+    metadata = split_payload.get("_metadata", {})
+    if isinstance(metadata, dict) and isinstance(metadata.get("num_samples"), int):
+        num_samples = metadata["num_samples"]
+        all_indices = set().union(*split_sets.values()) if split_sets else set()
+        out_of_range = sorted(index for index in all_indices if index >= num_samples)
+        if out_of_range:
+            reasons.append(f"split indices out of range for num_samples={num_samples}: {out_of_range[:10]}")
+        expected_total = sum(len(split_payload.get(key, [])) for key in ("train", "val", "test") if isinstance(split_payload.get(key), list))
+        if expected_total != num_samples:
+            reasons.append(f"split size mismatch: splits total {expected_total}, metadata num_samples {num_samples}")
 
 
 def load_split_payload(root_dir, split_file, reasons):
@@ -121,8 +183,14 @@ def load_split_payload(root_dir, split_file, reasons):
         reasons.append(f"missing split file: {split_path}")
         return None, None
 
-    with split_path.open(encoding="utf-8") as f:
-        payload = json.load(f)
+    try:
+        with split_path.open(encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        # A single unreadable split must block only this candidate, not crash the
+        # whole audit run (which would also drop already-collected rows).
+        reasons.append(f"split file unreadable: {exc}")
+        return split_path, None
     return split_path, payload
 
 
@@ -133,10 +201,9 @@ def audit_candidate(root_dir, cfg, seed, ablation_id=""):
     last_checkpoint_path = Path(artifact_path(str(root_dir), "last_checkpoint", cfg, seed, ".pth"))
 
     metrics = parse_result_metrics(result_path)
-    for key in ("selected_test_mae", "mae_raw", "mae_flip", "mae_multi"):
+    for key in ("mae_raw", "mae_flip", "mae_multi"):
         validate_float_field(metrics, key, reasons)
-    if metrics.get("selected_tta") != "multi":
-        reasons.append(f"selected_tta must be 'multi', got {metrics.get('selected_tta')!r}")
+    validate_selected_metric(metrics, reasons)
 
     best_metadata, error = load_checkpoint_metadata(best_model_path)
     if error:
@@ -192,6 +259,8 @@ def audit_candidate(root_dir, cfg, seed, ablation_id=""):
             )
 
     split_metadata = split_payload.get("_metadata", {}) if isinstance(split_payload, dict) else {}
+    if split_payload is not None:
+        validate_split_payload(split_payload, reasons)
     if split_payload is not None and not split_metadata:
         reasons.append("split file has no _metadata")
     if split_metadata:
@@ -204,12 +273,15 @@ def audit_candidate(root_dir, cfg, seed, ablation_id=""):
             reasons.append("split file is marked legacy_upgraded")
 
     if split_metadata:
-        cfg.split_metadata = {
-            "split_file": split_file,
-            "fingerprint": split_fingerprint,
-            "dataset_fingerprint": dataset_fingerprint,
-            "legacy_upgraded": bool(split_metadata.get("legacy_upgraded", False)),
-        }
+        from experiment import set_derived_attrs
+        set_derived_attrs(cfg, {
+            "split_metadata": {
+                "split_file": split_file,
+                "fingerprint": split_fingerprint,
+                "dataset_fingerprint": dataset_fingerprint,
+                "legacy_upgraded": bool(split_metadata.get("legacy_upgraded", False)),
+            }
+        })
     populate_runtime_model_metadata(cfg)
     expected_metadata = build_training_metadata(cfg, seed)
     for label, checkpoint_metadata in (("best_model", best_metadata), ("last_checkpoint", last_metadata)):
@@ -276,7 +348,7 @@ def main():
     parser.add_argument("--no_pretrained", dest="no_pretrained", action="store_true", default=False)
     parser.add_argument("--pretrained", dest="no_pretrained", action="store_false", help="Enable pretrained backbones")
     parser.add_argument("--experiment_tag", type=str, help="Audit a tagged side run instead of formal untagged artifacts")
-    parser.add_argument("--split_file_tag", type=str, help="Audit tagged split file/artifact identity")
+    parser.add_argument("--split_file_tag", type=str, default=PAPER_SPLIT_FILE_TAG, help="Audit tagged split file/artifact identity")
     parser.add_argument("--ablation_id", type=str, help="Comma-separated ablation ids to audit, e.g. A0,A3,A9")
     parser.add_argument("--output", type=str, default=str(ROOT_DIR / "docs" / "paper_result_audit.csv"))
     parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing audit CSV")
