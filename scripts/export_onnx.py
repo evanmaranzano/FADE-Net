@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(ROOT_DIR, "src"))
 from config import Config
 from experiment import (
     build_model_for_checkpoint_load,
-    checkpoint_metadata_mismatches,
+    inference_checkpoint_metadata_mismatches,
     load_model_state_package,
     build_training_metadata,
     format_metadata_mismatches,
@@ -48,7 +48,7 @@ def export_onnx(model_path, output_path, cfg, dynamic_batch=True):
     state_dict, checkpoint = load_model_state_package(model_path, device)
     populate_runtime_model_metadata(cfg)
     expected_metadata = build_training_metadata(cfg, checkpoint.get("metadata", {}).get("seed", 42) if isinstance(checkpoint, dict) else 42)
-    mismatches = checkpoint_metadata_mismatches(checkpoint, expected_metadata)
+    mismatches = inference_checkpoint_metadata_mismatches(checkpoint, expected_metadata)
     if mismatches:
         raise RuntimeError(f"Checkpoint metadata mismatch; refusing to export. {format_metadata_mismatches(mismatches)}")
     model = build_model_for_checkpoint_load(cfg)
@@ -79,16 +79,17 @@ def export_onnx(model_path, output_path, cfg, dynamic_batch=True):
     # Validate exported model
     try:
         import onnxruntime as ort
+    except ImportError:
+        print("ℹ️ onnxruntime not installed; skipping validation. Install with: pip install onnxruntime")
+    else:
         session = ort.InferenceSession(str(output_path))
         onnx_output = session.run(None, {"input": dummy.numpy()})
         max_diff = abs(ref_output.numpy() - onnx_output[0]).max()
-        print(f"✅ ONNX export validated. Max output diff: {max_diff:.6f}")
         if max_diff > 1e-4:
-            print(f"⚠️ Output diff {max_diff:.6f} > 1e-4 — check numeric precision")
-    except ImportError:
-        print("ℹ️ onnxruntime not installed; skipping validation. Install with: pip install onnxruntime")
-    except Exception as exc:
-        print(f"⚠️ ONNX runtime validation skipped after export: {type(exc).__name__}: {exc}")
+            raise RuntimeError(
+                f"ONNX output diff {max_diff:.6f} > 1e-4; refusing to report a numerically invalid export."
+            )
+        print(f"✅ ONNX export validated. Max output diff: {max_diff:.6f}")
 
     print(f"✅ Model exported to: {output_path}")
     print(f"   Input shape: [B, 3, {cfg.img_size}, {cfg.img_size}]")

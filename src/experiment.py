@@ -53,43 +53,6 @@ def populate_feature_spec_metadata(config) -> None:
         config.backbone_pretrained = original_pretrained
 
 
-def populate_runtime_model_metadata(config) -> None:
-    """Fill model-derived metadata fields without downloading pretrained weights.
-    Delegates to populate_feature_spec_metadata for MSFF fields, then builds
-    the full model to populate remaining derived fields (e.g. hybrid_attention)."""
-    from contextlib import redirect_stdout
-    import io
-
-    try:
-        from .model import LightweightAgeEstimator
-    except ImportError:
-        from model import LightweightAgeEstimator
-
-    original_pretrained = getattr(config, "backbone_pretrained", True)
-    config.backbone_pretrained = False
-    try:
-        with torch.no_grad(), redirect_stdout(io.StringIO()):
-            model = LightweightAgeEstimator(config)
-        del model
-    finally:
-        config.backbone_pretrained = original_pretrained
-
-
-def build_model_for_checkpoint_load(config):
-    """Build checkpoint target architecture without fetching pretrained weights."""
-    try:
-        from .model import LightweightAgeEstimator
-    except ImportError:
-        from model import LightweightAgeEstimator
-
-    original_pretrained = getattr(config, "backbone_pretrained", True)
-    config.backbone_pretrained = False
-    try:
-        return LightweightAgeEstimator(config)
-    finally:
-        config.backbone_pretrained = original_pretrained
-
-
 def sanitize_token(value: Any) -> str:
     token = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value).strip())
     return token.strip("._-") or "unset"

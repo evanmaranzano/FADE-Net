@@ -78,9 +78,9 @@ class Config:
     # --- 3. 🎯 核心超参数 (Based on Final Tuning) ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 年龄区间
-    min_age, max_age = 0, 80
-    num_classes = 81 
+    # 年龄区间 (AFAD: 15-40, 26 classes)
+    min_age, max_age = 15, 40
+    num_classes = 26
     
     # DLDL-v2 动态微调参数
     use_adaptive_sigma = True
@@ -90,7 +90,11 @@ class Config:
     lambda_rank = 0.5            # 👑 Standard: 0.5 for Ranking Loss weight
 
     # Mean-Variance Loss (Nuclear Weapon)
-    use_mv_loss = True
+    # Default False: keep consistent with other ablation switches. The paper's
+    # ablation pipeline (ablation_profiles.py) now explicitly enables MV only in
+    # profiles that claim it, so a bare Config() no longer silently injects MV
+    # Loss into baseline runs. CLI still controls it via --mv / --no-mv.
+    use_mv_loss = False
     lambda_mv = 0.1
 
     # Adaptive Triplet Loss (M2)
@@ -155,11 +159,42 @@ class Config:
     lds_sigma = 4                # 📉 Oracle: 4 (Stronger LDS smoothing)
     
     # 图片参数
-    img_size = 224
+    img_size = 256                 # 方案要求 256×256
     image_mean = [0.485, 0.456, 0.406]
     image_std = [0.229, 0.224, 0.225]
     num_workers = 4              # 🏎️ Optimized for CPU usage (avoid 100% load)
     early_stopping_patience = 999 # 🛡️ 2027 Strategy: "Trust the Process". Let Cosine Annealing finish its full cycle.
+
+    # --- 4. 🎯 DCSR Configuration ---
+    use_dcsr = True                # Enable Distribution-Conditioned Scale Routing
+    fusion_channels = 96           # Unified channel dimension for feature alignment
+    route_groups = 8               # Number of channel groups for grouped routing
+    coarse_head_dim = 128          # Hidden dimension for coarse distribution head
+    distribution_embed_dim = 16    # Distribution embedding dimension
+
+    # --- 5. 🎯 CGBR Configuration ---
+    use_cgbr = True                # Enable Correction-Need Guided Bounded Residual Refinement
+    residual_bound = 3.0           # τr: Maximum residual magnitude
+    gate_error_scale = 3.0         # τg: Error normalization for gate supervision
+    cgbr_start_epoch = 16          # Epoch to start CGBR training
+    cgbr_full_epoch = 26           # Epoch to reach full CGBR weights
+
+    # --- 6. 🎯 Loss Weights ---
+    lambda_main_kl = 1.0           # Main distribution KL loss weight
+    lambda_main_reg = 1.0          # Main age regression loss weight
+    lambda_coarse = 0.3            # Coarse distribution loss weight
+    lambda_refine = 0.5            # Refinement loss weight (ramps up)
+    lambda_gate = 0.1              # Gate supervision loss weight (ramps up)
+
+    # --- 7. 🎯 Label Distribution ---
+    label_sigma = 2.0              # Gaussian label distribution sigma
+
+    # --- 8. 🎯 Training Strategy ---
+    backbone_lr = 3e-5             # Backbone learning rate
+    head_lr = 3e-4                 # New modules learning rate
+    weight_decay = 5e-4            # AdamW weight decay
+    warmup_epochs = 5              # Learning rate warmup
+    gradient_clip = 5.0            # Gradient clipping max norm
 
     # TTA batch size: controls chunk size during augmented-view inference.
     # None = auto (min(total_views, max(batch_size*2, 16))).

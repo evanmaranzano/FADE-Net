@@ -80,8 +80,10 @@ def load_checkpoint_metadata(path):
         return None, f"missing checkpoint: {path}"
     try:
         checkpoint = safe_torch_load(path, "cpu")
-    except RuntimeError as exc:
-        return None, str(exc)
+    except Exception as exc:
+        # A single unreadable/corrupt/weights_only-blocked checkpoint must block
+        # only this candidate, not crash the whole audit run and drop all rows.
+        return None, f"checkpoint unreadable: {exc}"
     if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
         return None, f"not a packaged checkpoint: {path}"
     metadata = checkpoint.get("metadata")
@@ -250,7 +252,7 @@ def audit_candidate(root_dir, cfg, seed, ablation_id=""):
         reasons.append(f"smoke experiment_tag is not paper-ready: {metadata.get('experiment_tag')!r}")
 
     split_path, split_payload = load_split_payload(root_dir, split_file, reasons)
-    if split_path is not None:
+    if split_path is not None and split_payload is not None:
         actual_split_fingerprint = file_sha256(split_path)
         if actual_split_fingerprint != split_fingerprint:
             reasons.append(

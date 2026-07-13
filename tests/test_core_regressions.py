@@ -299,8 +299,11 @@ def test_validation_and_test_loaders_use_strict_collate(monkeypatch, tmp_path):
     assert val_loader.collate_fn is strict_collate_fn
     assert test_loader.collate_fn is strict_collate_fn
     assert train_loader.dataset.retry_on_none is True
-    assert val_loader.dataset.retry_on_none is False
-    assert test_loader.dataset.retry_on_none is False
+    # val/test now use bounded retry (same split) so a transient read failure on a
+    # single image recovers instead of aborting the whole eval, while strict_collate
+    # remains the last-resort fail-loud guard for persistently corrupt images.
+    assert val_loader.dataset.retry_on_none is True
+    assert test_loader.dataset.retry_on_none is True
 
 
 def test_dataloaders_reject_non_zero_min_age_without_offset_mapping(tmp_path):

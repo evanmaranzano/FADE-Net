@@ -22,7 +22,6 @@ sys.path.insert(0, os.path.join(ROOT_DIR, 'src'))
 
 from config import Config
 from ablation_profiles import apply_ablation_profile, parse_ablation_ids
-from model import LightweightAgeEstimator
 from dataset import get_dataloaders
 from experiment import (
     artifact_path,
