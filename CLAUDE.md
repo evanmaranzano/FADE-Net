@@ -17,14 +17,18 @@ src/experiment.py      — 配置元数据辅助函数
 
 ## Training protocol
 
-- AFAD，年龄 15–40，共 26 类
-- identity-disjoint fold split
+- AFAD 官方 `AFAD-Full.json`，实际训练标签 15–72；模型输出空间固定 0–80，共 81 类
+- CVPR 2024 official subject-exclusive fold split
 - 输入 256×256
 - MobileNetV4-Conv-Small pretrained
 - backbone lr `3e-5`，head lr `3e-4`
 - AdamW，weight decay `5e-4`
 - 120 epochs，batch size 64，CosineAnnealingLR
-- EMA 每个 optimizer step 更新；参数使用指数平均，buffer 从当前模型同步
+- EMA 每个 optimizer step 更新（衰减 0.999）；参数使用指数平均，buffer 从当前模型同步
+- 梯度裁剪 5.0
+- CGBR 分阶段启用：epoch 16 开始，epoch 26 完全启用
+- 标签分布 σ 2.0；融合通道 96；路由分组 8；残差边界 3.0
+- 论文目标：AFAD 五折平均 MAE < 3.20
 
 服务器当前训练命令使用 `src/train_fade_net.py --split_id 0`，输出写入独立实验目录，不覆盖历史 checkpoint。
 
