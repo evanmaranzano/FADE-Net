@@ -48,3 +48,7 @@ output/
 # IDE & Tools
 .codegraph/
 .cursor/
+
+# 本机配置（不进仓库）
+CLAUDE.local.md
+.claude/settings.local.json
