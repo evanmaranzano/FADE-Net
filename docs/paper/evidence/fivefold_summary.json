@@ -1,0 +1,536 @@
+{
+  "schema_version": 1,
+  "generated_at_note": "deterministic local audit; rerun date intentionally omitted",
+  "split_fingerprint": "8813b83131df5e09ccfeb9d513abaa72906da9f816e500dabe7a69e95f086375",
+  "standard_deviation": "population (ddof=0)",
+  "tta_selection": {
+    "candidate_views": [
+      2,
+      4,
+      6
+    ],
+    "selection_subset": "validation",
+    "rule": "minimum validation MAE independently within each fold"
+  },
+  "results": {
+    "small": {
+      "name": "small",
+      "folds": [
+        {
+          "fold": 0,
+          "run": "exp031_final",
+          "best_epoch": 29,
+          "best_val_mae": 3.2029134239874364,
+          "test_size": 33161,
+          "test_1x_mae": 3.181985532485052,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.1690708787546478,
+          "selected_test_mae": 3.145201153449049,
+          "checkpoint_bytes": 25792324,
+          "status": null,
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp031_final/results.json",
+            "results_sha256": "d5fb6f531376e29cc1fdfd82a6931471986b082fcfebe1840746f7b79fed35fb",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp031_final/val_tta_1to6.json",
+            "val_tta_sha256": "6031fab1c88f2cbaeffcde28a06269bfef8355dd1c2dc9deca8690363e8abe58",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp031_final/test_tta_1to6.json",
+            "test_tta_sha256": "5c834ec6826ededca73408c78cdada9b509dd9ccd93d62865b8c685a48e2ef25",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp031_final/best_checkpoint.pth"
+          }
+        },
+        {
+          "fold": 1,
+          "run": "exp045_final",
+          "best_epoch": 20,
+          "best_val_mae": 3.2191264845415346,
+          "test_size": 33067,
+          "test_1x_mae": 3.231431000607697,
+          "selected_tta_views": 4,
+          "selected_val_mae": 3.1824272636380675,
+          "selected_test_mae": 3.1802634709501523,
+          "checkpoint_bytes": 25792516,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp045_final/train_fade_net_exp045_conv_small_kd_farl_fold1_host_gpu3.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp045_final/results.json",
+            "results_sha256": "20c2e15e4024ad93d08779da7f4ef4bfa0f277271a99314369a0902979b7f901",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp045_final/val_tta.json",
+            "val_tta_sha256": "5cf88f1e261fe06dd4ac8e0f8110f04d155ece86663aa027b3dddb6ec66723eb",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp045_final/test_tta.json",
+            "test_tta_sha256": "865a2b15138f63ba1f6ee9a1fa180a59fff456a5fa0e3ca80d013ae801b6e828",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp045_final/best_checkpoint.pth"
+          }
+        },
+        {
+          "fold": 2,
+          "run": "exp047_final",
+          "best_epoch": 35,
+          "best_val_mae": 3.2191455151311077,
+          "test_size": 33085,
+          "test_1x_mae": 3.228400559156561,
+          "selected_tta_views": 4,
+          "selected_val_mae": 3.1586535409929732,
+          "selected_test_mae": 3.1724679472728567,
+          "checkpoint_bytes": 25792516,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp047_final/train_fade_net_exp047_conv_small_kd_farl_fold2_host_gpu3.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp047_final/results.json",
+            "results_sha256": "4a31b250cb9994bf0403ecf72b1103fc3312413823637907572fd6302aa0e13b",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp047_final/val_tta.json",
+            "val_tta_sha256": "34ff67a5b8c976bf4ca7325dfc7081a76e8ea48327f51ff9437310861c6a44f4",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp047_final/test_tta.json",
+            "test_tta_sha256": "ac2f9dfc8558aff260ab4920a1794f604713e186e177db6d2f5f03e582c6e0c5",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp047_final/best_checkpoint.pth"
+          }
+        },
+        {
+          "fold": 3,
+          "run": "exp049_final",
+          "best_epoch": 34,
+          "best_val_mae": 3.2278966205707076,
+          "test_size": 33182,
+          "test_1x_mae": 3.1918069003582663,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.1839876406431933,
+          "selected_test_mae": 3.1538042145851444,
+          "checkpoint_bytes": 25792516,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp049_final/train_fade_net_exp049_conv_small_kd_farl_fold3_host_gpu3.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp049_final/results.json",
+            "results_sha256": "745d25055c6f415e327b7985083117dcf324aa735934d47ef3ed3e6dc16b945a",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp049_final/val_tta.json",
+            "val_tta_sha256": "0f979a1ac71fcfddd3f67672d583844bf128a6c74a6b9e117f0afa766c36efbd",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp049_final/test_tta.json",
+            "test_tta_sha256": "ecbac35b27967183ed63d8ece55f6ae31ec0a1a2b27faf9933637a2537d2cc48",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp049_final/best_checkpoint.pth"
+          }
+        },
+        {
+          "fold": 4,
+          "run": "exp051_final",
+          "best_epoch": 39,
+          "best_val_mae": 3.222821125170607,
+          "test_size": 33062,
+          "test_1x_mae": 3.1873742972908117,
+          "selected_tta_views": 4,
+          "selected_val_mae": 3.1789563109115546,
+          "selected_test_mae": 3.140688770587947,
+          "checkpoint_bytes": 25792516,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp051_final/train_fade_net_exp051_conv_small_kd_farl_fold4_host_gpu3.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp051_final/results.json",
+            "results_sha256": "d200b0e5a7cef1cf9ceff7b7d85df01341e6b9628ee9a9fb3f6b5094754038f1",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp051_final/val_tta.json",
+            "val_tta_sha256": "16a1b944da7c4e9754b7c2bbb7380cf9c3981ad599125eeb0e8cc5f5e6ef9a60",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp051_final/test_tta.json",
+            "test_tta_sha256": "84bfafae4d523cc320dd36d5bbd0ab6855eb4f9fbe15d428b09d57c4ae635d5d",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp051_final/best_checkpoint.pth"
+          }
+        }
+      ],
+      "test_1x": {
+        "mean": 3.2041996579796774,
+        "population_std": 0.021247918553883506
+      },
+      "val_selected_tta": {
+        "mean": 3.1584851113690298,
+        "population_std": 0.015394159437108942
+      }
+    },
+    "medium": {
+      "name": "medium",
+      "folds": [
+        {
+          "fold": 0,
+          "run": "exp033_final",
+          "best_epoch": 15,
+          "best_val_mae": 3.167795217779245,
+          "test_size": 33161,
+          "test_1x_mae": 3.1644890241299963,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.1324335015468576,
+          "selected_test_mae": 3.1291028125694265,
+          "checkpoint_bytes": 121363285,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp033_final/train_fade_net_exp033_conv_medium_kd_farl_input256_host_gpu3.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp033_final/results.json",
+            "results_sha256": "d79e9aa00f46eedc4ad45c760b64b0dca15669a095559a3e66e7a12642421505",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp033_final/val_tta_1to6.json",
+            "val_tta_sha256": "f8ea54f9d6fcb6df5c1e1c02a449579938c2e24b4cadf29282d75168db075ffa",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp033_final/test_tta_1to6.json",
+            "test_tta_sha256": "603527cece0255a24493342fe1f9f374de3c63bbf93ed8b500b10b151c5639b5",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp033_final/best_checkpoint.pth"
+          }
+        },
+        {
+          "fold": 1,
+          "run": "exp044_final",
+          "best_epoch": 15,
+          "best_val_mae": 3.164514983535435,
+          "test_size": 33067,
+          "test_1x_mae": 3.18284408648244,
+          "selected_tta_views": 4,
+          "selected_val_mae": 3.126686127020961,
+          "selected_test_mae": 3.143370765263577,
+          "checkpoint_bytes": 121363285,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp044_final/train_fade_net_exp044_conv_medium_kd_farl_fold1_host_gpu2.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp044_final/results.json",
+            "results_sha256": "360191f6a81a85ecdfb283dd3cd4e27f47c8b1a2f818700e27df40057b02b1d0",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp044_final/val_tta.json",
+            "val_tta_sha256": "6d73f465fd405c1f2fbf5f44509916f0a45763d597f62a2bae6c40a0dbec6162",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp044_final/test_tta.json",
+            "test_tta_sha256": "aabafaa2c93e56998a912fd69f24d6be58d4591e7903820394a7515871675eb5",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp044_final/best_checkpoint.pth"
+          }
+        },
+        {
+          "fold": 2,
+          "run": "exp046_final",
+          "best_epoch": 17,
+          "best_val_mae": 3.167428048646897,
+          "test_size": 33085,
+          "test_1x_mae": 3.1708716770844894,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.1347607647708955,
+          "selected_test_mae": 3.1308404780378223,
+          "checkpoint_bytes": 121526545,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp046_final/train_fade_net_exp046_conv_medium_kd_farl_fold2_host_gpu2.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp046_final/results.json",
+            "results_sha256": "e093c0104c5f4151321a37d0f96237e620a8ebf266d11d2c5b5b67196ed54541",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp046_final/val_tta.json",
+            "val_tta_sha256": "69e96fcac4aefdafb56f8f19a108e62c424626f71f50ae6c8c6e7b111d348933",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp046_final/test_tta.json",
+            "test_tta_sha256": "16beb7ae23f9f0464ee05e03ee18f189ca2c61d8fca752a445a090ae0c5441da",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp046_final/best_checkpoint.pth"
+          }
+        },
+        {
+          "fold": 3,
+          "run": "exp048_final",
+          "best_epoch": 13,
+          "best_val_mae": 3.1725589699776644,
+          "test_size": 33182,
+          "test_1x_mae": 3.1545794265523583,
+          "selected_tta_views": 4,
+          "selected_val_mae": 3.1401948839348464,
+          "selected_test_mae": 3.1176905640928663,
+          "checkpoint_bytes": 121363285,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp048_final/train_fade_net_exp048_conv_medium_kd_farl_fold3_host_gpu2.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp048_final/results.json",
+            "results_sha256": "3e0c37838abec32344ef711bf83611121cfacc3e785bd7b1e58bdae5ef573a11",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp048_final/val_tta.json",
+            "val_tta_sha256": "da309a97a5a21f499f23485d6c695326d37a6886a8694b518e407579690dce76",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp048_final/test_tta.json",
+            "test_tta_sha256": "46051dc4c46b5e341ebb2b1fef4c98715fcc428d568b2f7d8c5767a417ba4456",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp048_final/best_checkpoint.pth"
+          }
+        },
+        {
+          "fold": 4,
+          "run": "exp050_final",
+          "best_epoch": 13,
+          "best_val_mae": 3.1693080256996655,
+          "test_size": 33062,
+          "test_1x_mae": 3.152130508861296,
+          "selected_tta_views": 6,
+          "selected_val_mae": 3.1200170716724855,
+          "selected_test_mae": 3.1085073614025296,
+          "checkpoint_bytes": 121363285,
+          "status": {
+            "path": "server_recovery/2026-07-17/host_restore_20260718/exp050_final/train_fade_net_exp050_conv_medium_kd_farl_fold4_host_gpu2.status",
+            "exit_code": 0
+          },
+          "sources": {
+            "results": "server_recovery/2026-07-17/host_restore_20260718/exp050_final/results.json",
+            "results_sha256": "cbabc9c43b422dbdabaeb85ef8124d3fb6fbe5f89e93625bb956127ae31a45b7",
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/exp050_final/val_tta.json",
+            "val_tta_sha256": "56a13dbb36e6c9d04161a17eb0d02fed49317cae113a1bde088ba26eb55d5e72",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/exp050_final/test_tta.json",
+            "test_tta_sha256": "bf894d3bba0d78e5f31519927ee56869531083df084c98736b50e6e4fc034473",
+            "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp050_final/best_checkpoint.pth"
+          }
+        }
+      ],
+      "test_1x": {
+        "mean": 3.1649829446221163,
+        "population_std": 0.011201426777284668
+      },
+      "val_selected_tta": {
+        "mean": 3.1259023962732444,
+        "population_std": 0.011914635177604174
+      }
+    },
+    "ensemble": {
+      "name": "ensemble",
+      "folds": [
+        {
+          "fold": 0,
+          "run": "ensemble_final",
+          "test_size": 33161,
+          "test_1x_mae": 3.055762433857629,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.053340344600888,
+          "selected_test_mae": 3.037401625145287,
+          "sources": {
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_final/ensemble_small_medium_val_w05.json",
+            "val_tta_sha256": "c1a7c9d828734a0b72c30ba22bc985cf75d4ba1fbf51a603048c0484bd2d221d",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_final/ensemble_small_medium_test_w05.json",
+            "test_tta_sha256": "2b68e8acd33d1221415c8f9d7b49065544e46c25f37111856237df612b52ec19"
+          }
+        },
+        {
+          "fold": 1,
+          "run": "ensemble_fold1",
+          "test_size": 33067,
+          "test_1x_mae": 3.1038646233663316,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.079115599380364,
+          "selected_test_mae": 3.089718250186175,
+          "sources": {
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_fold1/val_tta_w05.json",
+            "val_tta_sha256": "719ddd55944818df96053cdd15d8cc9ab6a2813d4069f9cf993af30fa9374c02",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_fold1/test_tta_w05.json",
+            "test_tta_sha256": "6eeed14d90a45d2af9382f1721ce611cecaa75478a90262e0a484d00bbe532d2"
+          }
+        },
+        {
+          "fold": 2,
+          "run": "ensemble_fold2",
+          "test_size": 33085,
+          "test_1x_mae": 3.080003350246199,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.0529899995169165,
+          "selected_test_mae": 3.057626129929818,
+          "sources": {
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_fold2/val_tta_w05.json",
+            "val_tta_sha256": "433dc5e665572f3dd9a251e686cb41a4f8ba018d8889172ad9035de893ca17ec",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_fold2/test_tta_w05.json",
+            "test_tta_sha256": "9e1f08afc81f618aa7f92c79349c56fbc27c0cd2307a8be84cc1f71c9ff54883"
+          }
+        },
+        {
+          "fold": 3,
+          "run": "ensemble_fold3",
+          "test_size": 33182,
+          "test_1x_mae": 3.0594906425556547,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.06219808676751,
+          "selected_test_mae": 3.039988523681817,
+          "sources": {
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_fold3/val_tta_w05.json",
+            "val_tta_sha256": "ea7b2bf194e04d45f00663a63c150417614ffbe19f3a31c9a110a21cb6b81bdf",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_fold3/test_tta_w05.json",
+            "test_tta_sha256": "5bf21bf1499bf0ea4513c4413ccc5efd07aa69c4c49ce5c84c39554e99822343"
+          }
+        },
+        {
+          "fold": 4,
+          "run": "ensemble_fold4",
+          "test_size": 33062,
+          "test_1x_mae": 3.0443237082696166,
+          "selected_tta_views": 2,
+          "selected_val_mae": 3.0471183558938653,
+          "selected_test_mae": 3.0265528689451324,
+          "sources": {
+            "val_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_fold4/val_tta_w05.json",
+            "val_tta_sha256": "49275106a3ea0c3ee4374eccfeb014c10083e702d150892985bcb03d8741fe56",
+            "test_tta": "server_recovery/2026-07-17/host_restore_20260718/ensemble_fold4/test_tta_w05.json",
+            "test_tta_sha256": "573a9441b76d2bf40b2bcd505f96ed7100a5307f3bcd0aae3595ba95e54d1e82"
+          }
+        }
+      ],
+      "test_1x": {
+        "mean": 3.0686889516590865,
+        "population_std": 0.02102718399456152
+      },
+      "val_selected_tta": {
+        "mean": 3.0502574795776463,
+        "population_std": 0.02210919464226164
+      }
+    }
+  },
+  "teachers": {
+    "name": "farl_teacher",
+    "folds": [
+      {
+        "fold": 0,
+        "run": "exp030_final",
+        "best_epoch": 12,
+        "best_val_mae": 2.9455326936861486,
+        "checkpoint_bytes": 1377169368,
+        "status": null,
+        "sources": {
+          "results": "server_recovery/2026-07-17/host_restore_20260718/exp030_final/results.json",
+          "results_sha256": "1187b5e7c94d8da99098d4742b14f5980fcee6d0beaf9e570fcf8be39eb1c767",
+          "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp030_final/best_checkpoint.pth"
+        }
+      },
+      {
+        "fold": 1,
+        "run": "exp040_final",
+        "best_epoch": 12,
+        "best_val_mae": 2.943507225492392,
+        "checkpoint_bytes": 1377169432,
+        "status": {
+          "path": "server_recovery/2026-07-17/host_restore_20260718/exp040_final/train_fade_net_exp040_farl_teacher_fold1_host_gpu3.status",
+          "exit_code": 0
+        },
+        "sources": {
+          "results": "server_recovery/2026-07-17/host_restore_20260718/exp040_final/results.json",
+          "results_sha256": "f7a355c8d730e7a00d9c06849f71712cfbcfa0466f73863e0a641421edf02fc4",
+          "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp040_final/best_checkpoint.pth"
+        }
+      },
+      {
+        "fold": 2,
+        "run": "exp041_final",
+        "best_epoch": 11,
+        "best_val_mae": 2.9479554275225213,
+        "checkpoint_bytes": 1377169432,
+        "status": {
+          "path": "server_recovery/2026-07-17/host_restore_20260718/exp041_final/train_fade_net_exp041_farl_teacher_fold2_host_gpu2.status",
+          "exit_code": 0
+        },
+        "sources": {
+          "results": "server_recovery/2026-07-17/host_restore_20260718/exp041_final/results.json",
+          "results_sha256": "a19ff5d4cefcebd24fb0b3c37f5349986dd9249f386c46fd05ab1c8671188017",
+          "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp041_final/best_checkpoint.pth"
+        }
+      },
+      {
+        "fold": 3,
+        "run": "exp042_final",
+        "best_epoch": 11,
+        "best_val_mae": 2.958923819711836,
+        "checkpoint_bytes": 1377169432,
+        "status": {
+          "path": "server_recovery/2026-07-17/host_restore_20260718/exp042_final/train_fade_net_exp042_farl_teacher_fold3_host_gpu2.status",
+          "exit_code": 0
+        },
+        "sources": {
+          "results": "server_recovery/2026-07-17/host_restore_20260718/exp042_final/results.json",
+          "results_sha256": "84bbc92f76cfcc957360352b3d9a8fceb9dff0f79ab25aff6decf09bf356573d",
+          "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp042_final/best_checkpoint.pth"
+        }
+      },
+      {
+        "fold": 4,
+        "run": "exp043_final",
+        "best_epoch": 12,
+        "best_val_mae": 2.935166762353287,
+        "checkpoint_bytes": 1377169432,
+        "status": {
+          "path": "server_recovery/2026-07-17/host_restore_20260718/exp043_final/train_fade_net_exp043_farl_teacher_fold4_host_gpu3.status",
+          "exit_code": 0
+        },
+        "sources": {
+          "results": "server_recovery/2026-07-17/host_restore_20260718/exp043_final/results.json",
+          "results_sha256": "a034650302dec4a0d9933cef5a11d9b48a891521d2250e9dfe09943f8fa7a346",
+          "checkpoint": "server_recovery/2026-07-17/host_restore_20260718/exp043_final/best_checkpoint.pth"
+        }
+      }
+    ],
+    "validation": {
+      "mean": 2.9462171857532367,
+      "population_std": 0.007673386505705808
+    }
+  },
+  "ablations": [
+    {
+      "name": "基础配置（含CGBR）",
+      "best_val_mae": 3.282684988786379,
+      "best_epoch": 21,
+      "source": "server_recovery/2026-07-17/files/data/outputs/fade_net_exp003_0_80_encoderfix_gpu3/fold0/results.json",
+      "source_sha256": "19d239e2178c1becb0ddb307dbb17a08d1c46431c322553af342318d713171c6"
+    },
+    {
+      "name": "关闭CGBR",
+      "best_val_mae": 3.3067402297558144,
+      "best_epoch": 40,
+      "source": "server_recovery/2026-07-17/files/data/outputs/fade_net_exp004_0_80_cgbr_ablation_gpu3/fold0/results.json",
+      "source_sha256": "2f5b598b70da61a5ae1922981155ee7429b8e9e0eddb5dccbe6c6fcee2d64eda"
+    },
+    {
+      "name": "Small，55轮，无知识蒸馏",
+      "best_val_mae": 3.2499237320802137,
+      "best_epoch": 27,
+      "source": "server_recovery/2026-07-17/host_restore_20260718/exp029_final/results.json",
+      "source_sha256": "cbcf7a463c6f9116daf531565c69088f6ad511466bbd8ccecdf68a8da813b60c"
+    },
+    {
+      "name": "Small，55轮，FaRL知识蒸馏",
+      "best_val_mae": 3.2029134239874364,
+      "best_epoch": 29,
+      "source": "server_recovery/2026-07-17/host_restore_20260718/exp031_final/results.json",
+      "source_sha256": "d5fb6f531376e29cc1fdfd82a6931471986b082fcfebe1840746f7b79fed35fb"
+    },
+    {
+      "name": "Small，FaRL知识蒸馏，关闭CGBR",
+      "best_val_mae": 3.2197385215747762,
+      "best_epoch": 21,
+      "source": "server_recovery/2026-07-17/host_restore_20260718/exp037_final/results.json",
+      "source_sha256": "a6d8835eda099171af77fbba87b6a838cad200b7a0ff0779ccf90e39a46a3875"
+    },
+    {
+      "name": "Medium，FaRL知识蒸馏，启用CGBR",
+      "best_val_mae": 3.167795217779245,
+      "best_epoch": 15,
+      "source": "server_recovery/2026-07-17/host_restore_20260718/exp033_final/results.json",
+      "source_sha256": "d79e9aa00f46eedc4ad45c760b64b0dca15669a095559a3e66e7a12642421505"
+    },
+    {
+      "name": "Medium，FaRL知识蒸馏，关闭CGBR",
+      "best_val_mae": 3.1660110726057384,
+      "best_epoch": 15,
+      "source": "server_recovery/2026-07-17/host_restore_20260718/exp036_final/results.json",
+      "source_sha256": "5836f378a892284dc02b8539351106f996f58bc72fb6104e72948d4426f95e1e"
+    },
+    {
+      "name": "路由分组4",
+      "best_val_mae": 3.2926505041073493,
+      "best_epoch": 20,
+      "source": "server_recovery/2026-07-17/host_restore_20260718/exp024_final/fold0/results.json",
+      "source_sha256": "6bc0ad5683517b64bb31b6b2289d0f3eabfd528badc2cc8b0f56da2c42673d14"
+    },
+    {
+      "name": "路由分组8",
+      "best_val_mae": 3.282684988786379,
+      "best_epoch": 21,
+      "source": "server_recovery/2026-07-17/files/data/outputs/fade_net_exp003_0_80_encoderfix_gpu3/fold0/results.json",
+      "source_sha256": "19d239e2178c1becb0ddb307dbb17a08d1c46431c322553af342318d713171c6"
+    },
+    {
+      "name": "路由分组16",
+      "best_val_mae": 3.303197186242078,
+      "best_epoch": 29,
+      "source": "server_recovery/2026-07-17/host_restore_20260718/exp023_final/results.json",
+      "source_sha256": "eaa85e04ce079e3f559753dc98123b94ddfadcde17eb52bc7f6f4f6a5de7c678"
+    }
+  ]
+}

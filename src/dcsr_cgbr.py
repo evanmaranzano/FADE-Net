@@ -13,7 +13,7 @@ import torch.nn.functional as F
 class DistributionStatistics(nn.Module):
     """Extract distribution statistics: expectation, entropy, variance, skewness, boundary mass."""
 
-    def __init__(self, min_age=15, max_age=40):
+    def __init__(self, min_age=0, max_age=80):
         super().__init__()
         self.min_age = min_age
         self.max_age = max_age
@@ -62,7 +62,7 @@ class DistributionStatistics(nn.Module):
 class DistributionEncoder(nn.Module):
     """Compress full distribution into a compact embedding."""
 
-    def __init__(self, num_classes=26, embed_dim=16):
+    def __init__(self, num_classes=81, embed_dim=16):
         super().__init__()
         self.mlp = nn.Sequential(
             nn.Linear(num_classes, 32),
@@ -97,7 +97,7 @@ class FeatureAdapter(nn.Module):
 class CoarseDistributionHead(nn.Module):
     """Generate coarse age distribution from deep features."""
 
-    def __init__(self, in_channels, num_classes=26, hidden_dim=128):
+    def __init__(self, in_channels, num_classes=81, hidden_dim=128):
         super().__init__()
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
@@ -115,8 +115,8 @@ class CoarseDistributionHead(nn.Module):
 class DCSR(nn.Module):
     """Distribution-Conditioned Scale Routing module."""
 
-    def __init__(self, fusion_channels=96, route_groups=8, num_classes=26,
-                 embed_dim=16, min_age=15, max_age=40):
+    def __init__(self, fusion_channels=96, route_groups=8, num_classes=81,
+                 embed_dim=16, min_age=0, max_age=80):
         super().__init__()
         self.fusion_channels = fusion_channels
         self.route_groups = route_groups
@@ -164,11 +164,11 @@ class DCSR(nn.Module):
         # Stack features: (B, 3, C, H, W)
         features = torch.stack([f1_resized, f2, f3_resized], dim=1)
 
-        # Distribution descriptor with stop-gradient
-        with torch.no_grad():
-            stats = self.dist_stats(coarse_probs)  # (B, 5)
-            embed = self.dist_encoder(coarse_probs)  # (B, embed_dim)
-            dist_desc = torch.cat([stats, embed], dim=1)  # (B, 5 + embed_dim)
+        # Stop gradients into the coarse head, but keep the encoder trainable.
+        coarse_probs = coarse_probs.detach()
+        stats = self.dist_stats(coarse_probs)  # (B, 5)
+        embed = self.dist_encoder(coarse_probs)  # (B, embed_dim)
+        dist_desc = torch.cat([stats, embed], dim=1)  # (B, 5 + embed_dim)
 
         # GAP of deep features
         gap = F.adaptive_avg_pool2d(f3, 1).flatten(1)  # (B, C)
@@ -205,9 +205,9 @@ class DCSR(nn.Module):
 class CGBR(nn.Module):
     """Correction-Need Guided Bounded Residual Refinement module."""
 
-    def __init__(self, in_channels, num_classes=26, embed_dim=16,
+    def __init__(self, in_channels, num_classes=81, embed_dim=16,
                  residual_bound=3.0, gate_error_scale=3.0,
-                 min_age=15, max_age=40):
+                 min_age=0, max_age=80):
         super().__init__()
         self.residual_bound = residual_bound
         self.gate_error_scale = gate_error_scale
@@ -216,9 +216,6 @@ class CGBR(nn.Module):
 
         # Distribution statistics extractor
         self.dist_stats = DistributionStatistics(min_age, max_age)
-
-        # Distribution encoder
-        self.dist_encoder = DistributionEncoder(num_classes, embed_dim)
 
         # Gate input: 5 stats + embed_dim
         gate_input_dim = 5 + embed_dim
@@ -254,11 +251,11 @@ class CGBR(nn.Module):
             residual: (B, 1) bounded residual
             refined_age: (B,) final refined age
         """
-        # Distribution descriptor with stop-gradient
-        with torch.no_grad():
-            stats = self.dist_stats(main_probs)  # (B, 5)
-            embed = self.main_dist_encoder(main_probs)  # (B, embed_dim)
-            dist_desc = torch.cat([stats, embed], dim=1)  # (B, 5 + embed_dim)
+        # Stop gradients into the main distribution head, but keep the encoder trainable.
+        main_probs = main_probs.detach()
+        stats = self.dist_stats(main_probs)  # (B, 5)
+        embed = self.main_dist_encoder(main_probs)  # (B, embed_dim)
+        dist_desc = torch.cat([stats, embed], dim=1)  # (B, 5 + embed_dim)
 
         # Correction-need gate
         gate = self.gate_head(dist_desc)  # (B, 1)
@@ -288,10 +285,11 @@ class CGBR(nn.Module):
 class FADELoss(nn.Module):
     """Combined loss for FADE-Net with DCSR and CGBR."""
 
-    def __init__(self, min_age=15, max_age=40, label_sigma=2.0,
+    def __init__(self, min_age=0, max_age=80, label_sigma=2.0,
                  lambda_main_kl=1.0, lambda_main_reg=1.0,
                  lambda_coarse=0.3, lambda_refine=0.5, lambda_gate=0.1,
-                 gate_error_scale=3.0):
+                 gate_error_scale=3.0, lambda_cdf=0.0,
+                 label_sigma_by_age=None):
         super().__init__()
         self.min_age = min_age
         self.max_age = max_age
@@ -303,9 +301,17 @@ class FADELoss(nn.Module):
         self.lambda_refine = lambda_refine
         self.lambda_gate = lambda_gate
         self.gate_error_scale = gate_error_scale
+        self.lambda_cdf = lambda_cdf
 
         # Age values
         self.register_buffer('ages', torch.arange(min_age, max_age + 1, dtype=torch.float32))
+        if label_sigma_by_age is not None:
+            label_sigma_by_age = torch.as_tensor(label_sigma_by_age, dtype=torch.float32)
+            if label_sigma_by_age.numel() != self.num_classes:
+                raise ValueError("label_sigma_by_age must have one value per output age")
+            if torch.any(label_sigma_by_age <= 0):
+                raise ValueError("label_sigma_by_age values must be positive")
+        self.register_buffer('label_sigma_by_age', label_sigma_by_age)
 
     def _gaussian_label(self, true_age):
         """Create Gaussian label distribution."""
@@ -313,10 +319,23 @@ class FADELoss(nn.Module):
         # ages: (K,)
         ages = self.ages.to(true_age.device)
         diff = ages.unsqueeze(0) - true_age.unsqueeze(1)  # (B, K)
-        log_weights = -0.5 * (diff / self.label_sigma) ** 2
+        if self.label_sigma_by_age is None:
+            sigma = self.label_sigma
+        else:
+            age_index = torch.round(true_age).long() - self.min_age
+            age_index = torch.clamp(age_index, 0, self.num_classes - 1)
+            sigma_table = self.label_sigma_by_age.to(true_age.device)
+            sigma = sigma_table[age_index].unsqueeze(1)
+        log_weights = -0.5 * (diff / sigma) ** 2
         # Normalize
         probs = F.softmax(log_weights, dim=1)
         return probs
+
+    @staticmethod
+    def _cdf_distance(pred_probs, target_probs):
+        pred_cdf = torch.cumsum(pred_probs, dim=1)
+        target_cdf = torch.cumsum(target_probs, dim=1)
+        return torch.mean(torch.sum((pred_cdf - target_cdf) ** 2, dim=1))
 
     def forward(self, outputs, true_ages, epoch=0, cgbr_start_epoch=16, cgbr_full_epoch=26):
         """
@@ -351,8 +370,10 @@ class FADELoss(nn.Module):
         main_probs = outputs['main_prob']
         base_age = outputs['base_age']
         main_reg = F.smooth_l1_loss(base_age, true_ages)
+        main_cdf = self._cdf_distance(main_probs, target_dist)
 
-        loss_main = self.lambda_main_kl * main_kl + self.lambda_main_reg * main_reg
+        loss_main = self.lambda_main_kl * main_kl + self.lambda_main_reg * main_reg + \
+                    self.lambda_cdf * main_cdf
 
         # 3. CGBR losses (ramp up)
         if epoch >= cgbr_start_epoch:
@@ -385,6 +406,7 @@ class FADELoss(nn.Module):
             'total': loss_total,
             'main_kl': main_kl,
             'main_reg': main_reg,
+            'main_cdf': main_cdf,
             'coarse_kl': coarse_kl,
             'coarse_reg': coarse_reg,
             'gate': loss_gate,

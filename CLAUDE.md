@@ -47,3 +47,7 @@ F:/Anaconda/envs/fade-net/python.exe -c "from pathlib import Path; compile(Path(
 - 不提交 `.codegraph/`、`.cursor/`、checkpoint、训练日志和缓存。
 - 论文结果文本、数据划分 JSON 和架构文档可提交。
 - 提交前检查 `git diff --check`、新版入口语法和训练日志。
+
+## Local overrides
+
+本机特定配置见 `CLAUDE.local.md`（Claude Code 会自动加载；其他工具请主动读取）。

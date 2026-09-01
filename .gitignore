@@ -52,3 +52,12 @@ output/
 # 本机配置（不进仓库）
 CLAUDE.local.md
 .claude/settings.local.json
+
+# 本机训练回档、权重与交接材料（不进公开仓库）
+server_recovery/
+pretrained/
+*.safetensors
+HANDOFF.md
+AGENTS.md
+*.remote_sync
+docs/paper_tables_v1.md

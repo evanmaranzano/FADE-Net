@@ -19,7 +19,7 @@ src/
 ## 模型与实验协议
 
 - 骨干：timm `mobilenetv4_conv_small`，使用预训练权重
-- 年龄范围：15–40 岁，共 26 类
+- 数据年龄范围：15–72 岁；模型输出空间固定为 0–80 岁（81 类），便于迁移到更宽年龄范围的数据集
 - 输入：RGB 256×256
 - 多尺度特征：浅层/中层/深层通道数 32/96/960
 - 预测流程：粗年龄分布 → DCSR → 主年龄分布 → CGBR 修正
@@ -43,11 +43,12 @@ pip install -r requirements.txt
 python src/train_fade_net.py \
   --afad_dir datasets/AFAD \
   --split_dir . \
+  --official_db data/official/AFAD-Full.json \
   --split_id 0 \
   --output_dir outputs/fade_net_ema_fix
 ```
 
-`--split_dir` 中需要存在 `dataset_split_AFAD_15_40_iddisjoint_fold0.json` 至 `fold4.json`。服务器五折启动脚本为 `scripts/train_fade_net.sh`。
+训练必须读取作者提供的 `data/official/AFAD-Full.json`，按官方 `folder` 字段构建五折；旧版项目生成的 split 文件已禁用。始终启用 `--strict_official_data`，官方 JSON 引用的图片缺失时在训练前直接报错。服务器五折启动脚本为 `scripts/train_fade_net.sh`。
 
 ## 产物管理
 

@@ -98,23 +98,29 @@ class FADENet(nn.Module):
         self._print_architecture()
 
     def _get_feature_indices(self, config):
-        """Get feature extraction indices based on backbone type."""
-        # For MobileNetV4-Small via timm:
-        # Index 0: 1/2, 32ch
-        # Index 1: 1/4, 32ch  <- F1 (shallow)
-        # Index 2: 1/8, 64ch  <- F2 (mid)
-        # Index 3: 1/16, 96ch
-        # Index 4: 1/32, 960ch <- F3 (deep)
-        # We use [1, 3] for capture, and deep feature as F3
-        self.feature_channels = [32, 96, 960]  # F1, F2, F3
-        return [1, 3]  # capture_indices for forward_features
+        """Probe the selected backbone instead of assuming Small-stage channels."""
+        configured_indices = tuple(
+            getattr(config, 'msff_feature_indices', (1, 3))
+        )
+        spec = self.backbone.infer_feature_spec(
+            getattr(config, 'img_size', 256), configured_indices
+        )
+        self.feature_channels = [
+            spec.shallow_channels,
+            spec.mid_channels,
+            spec.out_channels,
+        ]
+        return [spec.shallow_index, spec.mid_index]
 
     def _print_architecture(self):
         """Print architecture summary."""
         print("=" * 60)
         print("🎯 FADE-Net Architecture")
         print("=" * 60)
-        print(f"  Backbone: MobileNetV4-Conv-Small")
+        print(
+            f"  Backbone: {getattr(self.config, 'backbone_source', 'unknown')}/"
+            f"{getattr(self.config, 'backbone_name', type(self.backbone).__name__)}"
+        )
         print(f"  Age Range: {self.min_age}-{self.max_age} ({self.num_classes} classes)")
         print(f"  Feature Indices: {self.feature_indices}")
         print(f"  Feature Channels: {self.feature_channels}")
@@ -133,13 +139,9 @@ class FADENet(nn.Module):
         deep, captured = self.backbone.forward_features(
             x, capture_indices=self.feature_indices
         )
-        # captured is a dict: {index: tensor}
-        # F1 = captured[1] (1/4, 32ch)
-        # F2 = captured[3] (1/16, 96ch)
-        # F3 = deep (1/32, 960ch)
-        f1 = captured[self.feature_indices[0]]  # shallow
-        f2 = captured[self.feature_indices[1]]  # mid
-        f3 = deep  # deep
+        f1 = captured[self.feature_indices[0]]
+        f2 = captured[self.feature_indices[1]]
+        f3 = deep
         return [f1, f2, f3]
 
     def forward(self, x, return_features=False):

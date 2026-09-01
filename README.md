@@ -21,7 +21,7 @@ The previous `train.py`/`model.py`/`dataset.py`/`evaluation.py`/`utils.py` stack
 ## Model and protocol
 
 - Backbone: timm `mobilenetv4_conv_small`, pretrained
-- Age range: 15–40, 26 classes
+- Data age range: 15–72; model output range: 0–80 (81 classes), so the head is reusable on wider age datasets
 - Input: RGB 256×256
 - Multi-scale features: 32/96/960 channels from shallow, middle and deep stages
 - Head: coarse age distribution → DCSR → main age distribution → CGBR refinement
@@ -44,11 +44,12 @@ For one fold:
 python src/train_fade_net.py \
   --afad_dir datasets/AFAD \
   --split_dir . \
+  --official_db data/official/AFAD-Full.json \
   --split_id 0 \
   --output_dir outputs/fade_net_ema_fix
 ```
 
-The split directory must contain files named `dataset_split_AFAD_15_40_iddisjoint_fold0.json` through `fold4.json`. The server five-fold launcher is `scripts/train_fade_net.sh`.
+The training path requires the authors' `data/official/AFAD-Full.json` and builds folds from its official `folder` annotations. Legacy project-generated split files are disabled. `--strict_official_data` is always enforced so missing images fail before training. The server five-fold launcher is `scripts/train_fade_net.sh`.
 
 ## Outputs
 

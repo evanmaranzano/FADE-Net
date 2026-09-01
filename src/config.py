@@ -78,9 +78,11 @@ class Config:
     # --- 3. 🎯 核心超参数 (Based on Final Tuning) ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 年龄区间 (AFAD: 15-40, 26 classes)
-    min_age, max_age = 15, 40
-    num_classes = 26
+    # 模型输出空间固定为 0-80，训练数据范围由训练入口单独控制。
+    # AFAD-Full 当前可用标签为 15-72，不能把缺失年龄伪造成训练样本。
+    min_age, max_age = 0, 80
+    num_classes = 81
+    data_min_age, data_max_age = 15, 72
     
     # DLDL-v2 动态微调参数
     use_adaptive_sigma = True
@@ -163,7 +165,7 @@ class Config:
     image_mean = [0.485, 0.456, 0.406]
     image_std = [0.229, 0.224, 0.225]
     num_workers = 4              # 🏎️ Optimized for CPU usage (avoid 100% load)
-    early_stopping_patience = 999 # 🛡️ 2027 Strategy: "Trust the Process". Let Cosine Annealing finish its full cycle.
+    early_stopping_patience = 20
 
     # --- 4. 🎯 DCSR Configuration ---
     use_dcsr = True                # Enable Distribution-Conditioned Scale Routing
@@ -229,6 +231,14 @@ class Config:
             errors.append(f"min_age({self.min_age}) > max_age({self.max_age})")
         if self.num_classes != self.max_age - self.min_age + 1:
             errors.append(f"num_classes({self.num_classes}) != max_age({self.max_age}) - min_age({self.min_age}) + 1")
+        if self.data_min_age > self.data_max_age:
+            errors.append(
+                f"data_min_age({self.data_min_age}) > data_max_age({self.data_max_age})"
+            )
+        if self.data_min_age < self.min_age or self.data_max_age > self.max_age:
+            errors.append(
+                "data age range must be contained in the model output age range"
+            )
         if self.sigma_min > self.sigma_max:
             errors.append(f"sigma_min({self.sigma_min}) > sigma_max({self.sigma_max})")
         if self.learning_rate <= 0:
@@ -241,6 +251,10 @@ class Config:
             errors.append(f"freeze_backbone_epochs must be non-negative, got {self.freeze_backbone_epochs}")
         if self.num_workers < 0:
             errors.append(f"num_workers must be non-negative, got {self.num_workers}")
+        if self.early_stopping_patience < 0:
+            errors.append(
+                f"early_stopping_patience must be non-negative, got {self.early_stopping_patience}"
+            )
         if not (0 <= self.dropout < 1):
             errors.append(f"dropout must be in [0,1), got {self.dropout}")
         if not (0 <= self.mixup_prob <= 1):

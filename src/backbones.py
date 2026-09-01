@@ -1,4 +1,5 @@
 import logging
+import os
 from dataclasses import dataclass
 from typing import Callable
 
@@ -131,7 +132,10 @@ class TorchvisionMobileNetV3Backbone(FeatureBackbone):
 
 
 class TimmFeatureBackbone(FeatureBackbone):
-    def __init__(self, model_name: str, pretrained: bool = True):
+    def __init__(
+        self, model_name: str, pretrained: bool = True,
+        weights_file: str | None = None,
+    ):
         super().__init__()
         try:
             import timm
@@ -143,8 +147,19 @@ class TimmFeatureBackbone(FeatureBackbone):
 
         self.model_name = model_name
         self.pretrained_loaded = pretrained
+        create_kwargs = {}
+        local_weights = weights_file or os.environ.get("FADE_NET_TIMM_WEIGHTS")
+        if pretrained and local_weights:
+            if not os.path.isfile(local_weights):
+                raise FileNotFoundError(
+                    f"Backbone weights file does not exist: {local_weights}"
+                )
+            create_kwargs["pretrained_cfg_overlay"] = {"file": local_weights}
+            logger.info("Loading timm pretrained weights from local file: %s", local_weights)
         try:
-            self.model = timm.create_model(model_name, pretrained=pretrained, features_only=True)
+            self.model = timm.create_model(
+                model_name, pretrained=pretrained, features_only=True, **create_kwargs
+            )
         except (OSError, RuntimeError) as exc:
             raise RuntimeError(
                 f"Failed to load requested timm pretrained weights for {model_name}. "
@@ -177,9 +192,12 @@ def build_backbone(config) -> FeatureBackbone:
     source = getattr(config, "backbone_source", "torchvision")
     name = getattr(config, "backbone_name", "mobilenet_v3_large")
     pretrained = bool(getattr(config, "backbone_pretrained", True))
+    weights_file = getattr(config, "backbone_weights", None)
 
     if source == "torchvision" and name == "mobilenet_v3_large":
         return TorchvisionMobileNetV3Backbone(pretrained=pretrained)
     if source == "timm":
-        return TimmFeatureBackbone(name, pretrained=pretrained)
+        return TimmFeatureBackbone(
+            name, pretrained=pretrained, weights_file=weights_file
+        )
     raise ValueError(f"Unsupported backbone: source={source!r}, name={name!r}")

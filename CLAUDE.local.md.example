@@ -1,0 +1,6 @@
+# CLAUDE.local.example.md — 本机开发环境模板
+
+复制为 `CLAUDE.local.md` 并填写本机实际值：
+
+- conda 环境：`<环境名>`，解释器 `<python.exe 路径>`
+- 训练服务器：`<主机>`（代码/数据/输出路径）
